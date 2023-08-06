@@ -16,6 +16,12 @@ pub struct Cli {
     /// Path to the config_ini file to usse
     #[clap(short, long, value_parser)]
     pub config_ini: Option<std::path::PathBuf>,
+    /// Data generator thread delay in seconds
+    #[clap(short, long)]
+    pub data_delay: u64,
+    /// Data generator thread run time in minutes
+    #[clap(short, long)]
+    pub data_run_time: u64,
 }
 
 impl Cli {

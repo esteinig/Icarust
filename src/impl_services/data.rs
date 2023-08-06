@@ -27,6 +27,9 @@ use std::time::Duration;
 use std::time::Instant;
 use std::{thread, u8};
 
+// ES - add futures::lock::Mutex
+use futures::lock::Mutex as AsyncMutex;
+
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::prelude::*;
 use fnv::FnvHashSet;
@@ -319,18 +322,17 @@ fn get_barcode_squiggle(
 /// Start the thread that will handle writing out the FAST5 file,
 fn start_write_out_thread(
     run_id: String,
-    config: Cli,
+    config: &Config,
     output_path: PathBuf,
     write_out_gracefully: Arc<Mutex<bool>>,
 ) -> SyncSender<ReadInfo> {
     let (complete_read_tx, complete_read_rx) = sync_channel(8000);
-    let x = config;
-
+    
+    let config = config.clone();
     thread::spawn(move || {
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
         let exp_start_time = Utc::now();
         let iso_time = exp_start_time.to_rfc3339_opts(SecondsFormat::Millis, false);
-        let config = _load_toml(&x.simulation_profile);
         let experiment_duration = config.get_experiment_duration_set().to_string();
         // std::env::set_var("HDF5_PLUGIN_PATH", "./vbz_plugin".resolve().as_os_str());
         let context_tags = HashMap::from([
@@ -563,6 +565,10 @@ fn take_actions(
             // iterate a vec of Action
             let mut read_infos = channel_read_info.lock().unwrap();
             for action in actions.actions {
+                // ES: Action can be optional on RPC. Added a continue statement.
+                if let None = action.action {
+                    continue;
+                }
                 let action_type = action.action.unwrap();
                 let zero_index_channel = action.channel as usize - 1;
                 let (_action_response, unblock_count, stopped_count) = match action_type {
@@ -1063,7 +1069,7 @@ fn generate_read(
     read_number: &mut u32,
     start_time: &u64,
     barcode_squig: &HashMap<String, (Vec<i16>, Vec<i16>)>,
-) {
+) { 
     // set stop receieivng to false so we don't accidentally not send the read
     value.stop_receiving = false;
     // update as this read hasn't yet been unblocked
@@ -1158,13 +1164,14 @@ fn generate_read(
 impl DataServiceServicer {
     pub fn new(
         run_id: String,
-        cli_opts: Cli,
+        config: &Config,
         output_path: PathBuf,
         channel_size: usize,
         graceful_shutdown: Arc<Mutex<bool>>,
+        data_delay: u64,   // seconds
+        data_run_time: u64 // seconds
     ) -> DataServiceServicer {
         let now = Instant::now();
-        let config = _load_toml(&cli_opts.simulation_profile);
 
         let working_pore_percent = config.get_working_pore_precent();
         let break_chunks_ms: u64 = config.parameters.get_chunk_size_ms();
@@ -1184,8 +1191,8 @@ impl DataServiceServicer {
         let (views, dist) = process_samples_from_config(&config);
         let files: Vec<String> = views.keys().cloned().collect();
         let write_out_gracefully = Arc::clone(&graceful_shutdown);
-        let complete_read_tx =
-            start_write_out_thread(run_id, cli_opts, output_path, write_out_gracefully);
+        let end_run_time_gracefully = Arc::clone(&write_out_gracefully);
+        let complete_read_tx: SyncSender<ReadInfo> = start_write_out_thread(run_id, config, output_path, write_out_gracefully);
         let mut rng: StdRng = rand::SeedableRng::seed_from_u64(1234567);
 
         let starting_functional_pore_count =
@@ -1193,8 +1200,19 @@ impl DataServiceServicer {
         let death_chance = config.calculate_death_chance(starting_functional_pore_count);
         let mut time_logged_at: f64 = 0.0;
         info!("Death chances {:#?}", death_chance);
+
+        if data_run_time > 0 {
+            warn!("Maximum run time for data generation set to {} seconds", data_run_time)
+        }
+
         // start the thread to generate data
         thread::spawn(move || {
+
+            if data_delay > 0 {
+                info!("Delay data generation by {} seconds...", &data_delay);
+                thread::sleep(std::time::Duration::from_secs(data_delay.clone()));
+            }
+
             let r: ReacquisitionPoisson = ReacquisitionPoisson::new(1.0, 0.0, 0.0001, 0.05);
 
             // read number for adding to unblock
@@ -1295,6 +1313,7 @@ impl DataServiceServicer {
                         }
                     }
                 }
+                // ES - around 10ms - a little latency for read processing overhead but cannot explain larger component - warn!("Generated reads in {} ms", read_process.elapsed().as_millis());
                 let _end = now.elapsed().as_secs_f64();
                 if _end.ceil() > time_logged_at {
                     info!(
@@ -1311,6 +1330,19 @@ impl DataServiceServicer {
                 if dead_pores >= (0.97 * channel_size as f64) as usize {
                     break;
                 }
+                // Maximum run time of data generation
+                if data_run_time > 0 {
+                    if now.elapsed().as_secs() >= data_run_time+data_delay {
+                        warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
+                        {
+                            let mut x = end_run_time_gracefully.lock().unwrap();
+                            *x = true;
+                        }
+                        std::thread::sleep(Duration::from_millis(2000));
+                        std::process::exit(0);
+                    }
+                }
+                
             }
         });
         // return our newly initialised DataServiceServicer to add onto the GRPC server
@@ -1320,6 +1352,20 @@ impl DataServiceServicer {
             setup: is_safe_setup,
             break_chunks_ms,
             channel_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelRange {
+    pub start: usize,
+    pub end: usize
+}
+impl ChannelRange {
+    pub fn new(channel_size: &usize) -> Self {
+        Self {
+            start: 0,
+            end: channel_size.clone()
         }
     }
 }
@@ -1343,18 +1389,38 @@ impl DataService for DataServiceServicer {
         let channel_size = self.channel_size;
         let mut stream_counter = 1;
         let break_chunk_ms = self.break_chunks_ms;
-        let chunk_size = break_chunk_ms as f64 / 1000.0 * 4000.0;
+        let chunk_size = break_chunk_ms as f64 / 1000.0 * 4000.0; 
+
+        // let uuid = Uuid::new_v4().to_string();
+        // ES: try with an async mutex just to see what happens
+
+        let channel_range = Arc::new(AsyncMutex::new(ChannelRange::new(&channel_size)));
+        let channel_range_clone = Arc::clone(&channel_range);
+
+        // ES: Really clever to have the threads inside the stream generator and push data back through a bounded queue to yield into the stream
 
         // Stream the responses back
         let output = async_stream::try_stream! {
             // Async channel that will await when it ahs one elemnt. This pushes the read response back immediately.
             let (tx_get_live_reads_response, mut rx_get_live_reads_response) = tokio::sync::mpsc::channel(1);
+            
+
             // spawn an async thread that handles the incoming Get Live Reads Requests.
             //  This is spawned after we receive our first connection.
             tokio::spawn(async move {
                 while let Some(live_reads_request) = stream.next().await {
                     let now2 = Instant::now();
                     let live_reads_request = live_reads_request.unwrap();
+
+                    if let Some(get_live_reads_request::Request::Setup(setup_request)) = &live_reads_request.request {
+                        let mut range = channel_range.lock().await;
+                        
+                        range.start = setup_request.first_channel as usize - 1;  // indices for the loop below
+                        range.end = setup_request.last_channel as usize - 1;
+
+                        println!("ChannelRange {:?}", &range);
+                    }
+
                     // send all the actions we wish to take to action thread
                     // Unw
                     tx_unblocks.send(live_reads_request).unwrap();
@@ -1363,10 +1429,11 @@ impl DataService for DataServiceServicer {
             });
             // spawn an async thread that will get the read data from the data generation thread and return it.
             tokio::spawn(async move {
+
                 loop{
+
                     let now2 = Instant::now();
-                    let mut container: Vec<(usize, ReadData)> = Vec::with_capacity(channel_size);
-                    // Number of chunks that we will send back
+                    let mut container: Vec<(usize, ReadData)> = Vec::with_capacity(channel_size); 
                     let size = channel_size as f64 / 24_f64;
                     let size = size.ceil() as usize;
                     let mut channel: u32 = 1;
@@ -1378,8 +1445,18 @@ impl DataService for DataServiceServicer {
                     // calculate number of samples to slice - roughly the time we break reads * 4000, so for the default 0.4 seconds
                     // we serve 0.4 * 4000 (1600) samples
 
+
                     // The below code block allows us to Send the responses across an await.
-                    {
+                    {   
+
+                        let range = channel_range_clone.lock().await;
+
+                        // ES: We can seemingly access the Arc<Mutex<RunSetup>> in this block - interesting!
+                        // ES: Configuring only the data response channels still lets the data generation thread 
+                        // ES: create data for all channels. Does this introduce latency on every loop iteration
+                        // ES: though? Would be ideal to do this outside somehow? It feels instable in the logs
+
+
                         // get the channel data vec
                         // The below code block allows us to unlock a syncronous Arc Mutex across an asyncronous await.
                         let mut read_data_vec = {
@@ -1388,8 +1465,24 @@ impl DataService for DataServiceServicer {
                             debug!("Got GRPC lock {:#?}", now2.elapsed().as_millis());
                             z1
                         };
+                        // println!("Process {} ({} - {})", &uuid, &range.start, &range.end);
+                        
+                        // let (channel_start_index, channel_end_index) = {
+                            // debug!("Getting setup lock {:#?}", now2.elapsed().as_millis());
+                            // let mut setup_guard = setup.lock().unwrap();
+                            // debug!("Got setup lock {:#?}", now2.elapsed().as_millis());
+
+                            // // println!("ArcMutex of setup configuration: {} {}", setup_guard.first, setup_guard.last)
+                            // (setup_guard.first as usize - 1, setup_guard.last as usize)
+                        // };
+                        
                         // Iterate over each channel
-                        for i in 0..channel_size {
+                        for i in range.start..range.end {
+
+                            // ES: check to see if all working correctly: 
+                            
+                            
+
                             let mut read_info = read_data_vec.get_mut(i).unwrap();
                             debug!("Elapsed at start of drain {}", now2.elapsed().as_millis());
                             if !read_info.stop_receiving && !read_info.was_unblocked && read_info.read.len() > 0 {
@@ -1471,7 +1564,28 @@ impl DataService for DataServiceServicer {
                         channel_data.clear();
                     }
                     container.clear();
-                    thread::sleep(Duration::from_millis(break_chunk_ms));
+                    // ES curiously the unblock-all increase in latency is around 180 bp 
+                    // maybe this contributes when set at 400 ms? This is pretty much it
+                    // could it be that the read generation takes approx 400 ms time so
+                    // that this sleep takes essentially another chunk? I assume this delay
+                    // is not the case when MinKNOW samples from real ADC streams where
+                    // the data does not have to be generated - measure time on this.
+
+                    // Measured time to generate a batch of reads on channels and time to
+                    // take unblock actions and neither comes anywhere near 0.4 seconds.
+
+                    // I think now that this sleep call is conceptually wrong, in that the
+                    // value in MinKNOW ( break_reads_after_seconds) partitions the raw
+                    // data streams (reference to hyperstreams in the documentation) but
+                    // since we have here generated these chunks already (equivalent to 
+                    // sampling a continous chunk from a raw data stream) this adds
+                    // and extra duration to the read we observe when we compare to 
+                    // playback runs in MinKNOW. Test with Readfish.
+
+                    // I think it is ok - the mean read lengths are correct, it might
+                    // just have affected delay in the unblock settings?
+
+                    // thread::sleep(Duration::from_millis(break_chunk_ms));
                 }
 
             });

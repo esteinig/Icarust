@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 #![deny(missing_doc_code_examples)]
 #![recursion_limit = "1024"]
 //! # Icarust
@@ -27,7 +27,6 @@ mod services;
 
 use chrono::prelude::*;
 use clap::Parser;
-use configparser::ini::Ini;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -69,8 +68,9 @@ pub enum PoreType {
     /// R9 pore
     R9,
 }
+
 #[derive(Deserialize, Debug, Clone)]
-struct Config {
+pub struct Config {
     parameters: Parameters,
     sample: Vec<Sample>,
     output_path: std::path::PathBuf,
@@ -79,6 +79,7 @@ struct Config {
     target_yield: f64,
     working_pore_percent: Option<usize>,
     pore_type: Option<String>,
+    
 }
 
 impl Config {
@@ -171,7 +172,11 @@ impl Config {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-struct Parameters {
+pub struct Parameters {
+    cert_dir: PathBuf,
+    manager_port: u32,
+    position_port: u32,
+    channels: usize,
     sample_name: String,
     experiment_name: String,
     flowcell_name: String,
@@ -188,7 +193,7 @@ impl Parameters {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-struct Sample {
+pub struct Sample {
     name: String,
     input_genome: std::path::PathBuf,
     mean_read_length: Option<f64>,
@@ -217,10 +222,149 @@ impl Sample {
 
 /// Loads our config TOML to get the sample name, experiment name and flowcell name, which is returned as a Config struct.
 fn _load_toml(file_path: &std::path::PathBuf) -> Config {
-    let contents =
-        fs::read_to_string(file_path).expect("Something went wrong with reading the config file -");
+    let contents = fs::read_to_string(file_path).expect("Something went wrong with reading the config file");
     let config: Config = toml::from_str(&contents).unwrap();
     config
+}
+
+/// Icarust main runner
+struct Icarust {
+    pub config: Config,
+    pub run_id: String,
+    pub output_path: PathBuf
+}
+impl Icarust {
+    pub fn from_toml(file_path: &PathBuf) -> Self {
+        
+        let config = _load_toml(file_path);
+        config.check_fields();
+
+        let (run_id, output_path) = Icarust::get_run_params(&config);
+        Self { config, run_id, output_path }
+    }
+    // Delay and runtime in seconds
+    pub async fn run(&self, data_delay: u64, data_runtime: u64) -> Result<(), Box<dyn std::error::Error>>  {
+
+        // Manager service
+        let tls_manager = self.get_tls_config();
+        let addr_manager = format!("[::0]:{}", self.config.parameters.manager_port).parse().unwrap();
+        let manager_service_server = self.get_manager_service_server();
+
+        // Spawn an Async thread and send it off somewhere
+        tokio::spawn(async move {
+            Server::builder()
+            .tls_config(tls_manager)
+            .unwrap()
+            .concurrency_limit_per_connection(256)
+            .add_service(manager_service_server)
+            .serve(addr_manager)
+            .await
+            .unwrap();
+        });
+
+        // Graceful shutdown
+        let graceful_shutdown = Arc::new(Mutex::new(false));
+        let graceful_shutdown_clone = Arc::clone(&graceful_shutdown);
+
+        // Create the position server for our one position.
+        let log_svc = LogServiceServer::new(Log {});
+        let instance_svc = InstanceServiceServer::new(Instance {});
+        let analysis_svc = AnalysisConfigurationServiceServer::new(Analysis {});
+        let device_svc = DeviceServiceServer::new(Device::new(self.config.parameters.channels));
+        let acquisition_svc = AcquisitionServiceServer::new(Acquisition {
+            run_id: self.run_id.clone(),
+        });
+        let protocol_svc = ProtocolServiceServer::new(ProtocolServiceServicer::new(
+            self.run_id.clone(), self.output_path.clone(),
+        ));
+
+
+        let data_service_server = DataServiceServer::new(DataServiceServicer::new(
+            self.run_id.clone(),
+            &self.config,
+            self.output_path.clone(),
+            self.config.parameters.channels,
+            graceful_shutdown_clone,
+            data_delay,
+            data_runtime
+        ));
+        
+        ctrlc::set_handler(move || {
+            {
+                let mut x = graceful_shutdown.lock().unwrap();
+                *x = true;
+            }
+            std::thread::sleep(Duration::from_millis(2000));
+            std::process::exit(0);
+        })
+            .expect("FAILED TO CATCH SIGNAL SOMWHOW");
+
+            
+        let tls_position = self.get_tls_config();
+        let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
+
+        Server::builder()
+            .tls_config(tls_position)
+            .unwrap()
+            .concurrency_limit_per_connection(256)
+            .add_service(log_svc)
+            .add_service(device_svc)
+            .add_service(instance_svc)
+            .add_service(analysis_svc)
+            .add_service(acquisition_svc)
+            .add_service(protocol_svc)
+            .add_service(data_service_server)
+            .serve(addr_position)
+            .await?;
+
+        Ok(())
+    }
+    fn get_manager_service_server(&self) -> ManagerServiceServer<Manager> {
+
+        // Create the manager server and add the service to it
+        let manager_init = Manager {
+            positions: vec![FlowCellPosition {
+                name: self.config.parameters.device_id.clone(),
+                state: 1,
+                rpc_ports: Some(RpcPorts {
+                    secure: 10001,
+                    secure_grpc_web: 420,
+                }),
+                protocol_state: 1,
+                error_info: "Help me I'm trapped in the computer".to_string(),
+                shared_hardware_group: Some(SharedHardwareGroup { group_id: 1 }),
+                is_integrated: true,
+                can_sequence_offline: true,
+                location: None,
+            }],
+        };
+        ManagerServiceServer::new(manager_init)
+    }
+    fn get_tls_config(&self) -> ServerTlsConfig {
+        let cert = std::fs::read(self.config.parameters.cert_dir.join("localhost.crt")).expect("No TLS cert found");
+        let key = std::fs::read(self.config.parameters.cert_dir.join("localhost.key")).expect("No TLS key found");
+        let server_identity = Identity::from_pem(cert, key);
+        ServerTlsConfig::new().identity(server_identity)
+    }
+    fn get_run_params(config: &Config) -> (String, PathBuf) {
+
+        let run_id = Uuid::new_v4().to_string().replace('-', "");
+        let sample_id = config.parameters.sample_name.clone();
+        let experiment_id = config.parameters.experiment_name.clone();
+        let output_dir = config.output_path.clone();
+        let start_time_string: String = format!("{}", Utc::now().format("%Y%m%d_%H%M"));
+        let flowcell_id = config.parameters.flowcell_name.clone();
+        let mut output_path = output_dir.clone();
+        output_path.push(experiment_id);
+        output_path.push(sample_id);
+        output_path.push(format!(
+            "{}_XIII_{}_{}",
+            start_time_string,
+            flowcell_id,
+            &run_id[0..9],
+        ));
+        (run_id, output_path)
+    }
 }
 
 /// Main function - Runs two asynchronous GRPC servers
@@ -233,135 +377,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = cli::Cli::parse();
     args.set_logging();
     args.check_config_exists();
-    // Parse the config to load all the samples
-    let config = _load_toml(&args.simulation_profile);
-    config.check_fields();
 
-    // Read the config.ini to get the TLS and ports and number of channels
-    let mut software_config = Ini::new();
-    let default_config_path = &PathBuf::from("config.ini");
-    let config_ini_path: &PathBuf = args.config_ini.as_ref().unwrap_or(default_config_path);
-    software_config.load(config_ini_path)?;
-
-    let m_port = software_config
-        .getint("PORTS", "manager")
-        .unwrap()
-        .expect("Error reading config manager port.");
-    let a_port = software_config
-        .getint("PORTS", "position")
-        .unwrap()
-        .expect("Error reading config position port.");
-    let tls_cert_path = PathBuf::from(
-        software_config
-            .get("TLS", "cert-dir")
-            .expect("Tls cert dir not found in config.ini"),
-    ); // Setup the TLS certifcates using the Minknow TLS certs
-    let cert = tokio::fs::read(format!("{}", tls_cert_path.join("localhost.crt").display()))
-        .await
-        .expect("No TLS certs found");
-    let key = tokio::fs::read(format!("{}", tls_cert_path.join("localhost.key").display())).await?;
-    let server_identity = Identity::from_pem(cert, key);
-    let tls = ServerTlsConfig::new().identity(server_identity);
-    let tls_position = tls.clone();
-    // Set the positions that we will be serving on
-    let addr_manager = format!("[::0]:{}", m_port).parse().unwrap();
-    let addr_position: SocketAddr = format!("[::0]:{}", a_port).parse().unwrap();
-    // Randomly generate a run id
-    let run_id = Uuid::new_v4().to_string().replace('-', "");
-    let sample_id = config.parameters.sample_name.clone();
-    let experiment_id = config.parameters.experiment_name.clone();
-    let output_dir = config.output_path.clone();
-    let start_time_string: String = format!("{}", Utc::now().format("%Y%m%d_%H%M"));
-    let flowcell_id = config.parameters.flowcell_name.clone();
-    let mut output_path = output_dir.clone();
-    output_path.push(experiment_id);
-    output_path.push(sample_id);
-    output_path.push(format!(
-        "{}_XIII_{}_{}",
-        start_time_string,
-        flowcell_id,
-        &run_id[0..9],
-    ));
-
-    let channel_size: usize = software_config
-        .getint("SEQUENCER", "channels")
-        .unwrap()
-        .expect("Error reading channel size from config.ini.")
-        .try_into()
-        .unwrap();
-    // Create the manager server and add the service to it
-    let manager_init = Manager {
-        positions: vec![FlowCellPosition {
-            name: config.parameters.device_id,
-            state: 1,
-            rpc_ports: Some(RpcPorts {
-                secure: 10001,
-                secure_grpc_web: 420,
-            }),
-            protocol_state: 1,
-            error_info: "Help me I'm trapped in the computer".to_string(),
-            shared_hardware_group: Some(SharedHardwareGroup { group_id: 1 }),
-            is_integrated: true,
-            can_sequence_offline: true,
-            location: None,
-        }],
-    };
-    let svc = ManagerServiceServer::new(manager_init);
-    // Spawn an Async thread and send it off somewhere to be our manager
-    tokio::spawn(async move {
-        Server::builder()
-            .tls_config(tls)
-            .unwrap()
-            .concurrency_limit_per_connection(256)
-            .add_service(svc)
-            .serve(addr_manager)
-            .await
-            .unwrap();
-    });
-
-    let graceful_shutdown = Arc::new(Mutex::new(false));
-    let graceful_shutdown_clone = Arc::clone(&graceful_shutdown);
-    // Create the position server for our one position.
-    let log_svc = LogServiceServer::new(Log {});
-    let instance_svc = InstanceServiceServer::new(Instance {});
-    let analysis_svc = AnalysisConfigurationServiceServer::new(Analysis {});
-    let device_svc = DeviceServiceServer::new(Device::new(channel_size));
-    let acquisition_svc = AcquisitionServiceServer::new(Acquisition {
-        run_id: run_id.clone(),
-    });
-    let protocol_svc = ProtocolServiceServer::new(ProtocolServiceServicer::new(
-        run_id.clone(),
-        output_path.clone(),
-    ));
-    let data_svc = DataServiceServer::new(DataServiceServicer::new(
-        run_id.clone(),
-        args,
-        output_path.clone(),
-        channel_size,
-        graceful_shutdown_clone,
-    ));
-    ctrlc::set_handler(move || {
-        {
-            let mut x = graceful_shutdown.lock().unwrap();
-            *x = true;
-        }
-        std::thread::sleep(Duration::from_millis(2000));
-        std::process::exit(0);
-    })
-    .expect("FAILED TO CATCH SIGNAL SOMWHOW");
-    Server::builder()
-        .tls_config(tls_position)
-        .unwrap()
-        .concurrency_limit_per_connection(256)
-        .add_service(log_svc)
-        .add_service(device_svc)
-        .add_service(instance_svc)
-        .add_service(analysis_svc)
-        .add_service(acquisition_svc)
-        .add_service(protocol_svc)
-        .add_service(data_svc)
-        .serve(addr_position)
-        .await?;
+    let icarust = Icarust::from_toml(&args.simulation_profile);
+    icarust.run(args.data_delay, args.data_run_time).await?;
 
     Ok(())
 }
