@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 #![deny(missing_doc_code_examples)]
 #![allow(clippy::too_many_arguments)]
 //! This module contains all the code to create a new DataServiceServicer, which spawns a data generation thread that acts an approximation of a sequencer.
@@ -45,7 +45,6 @@ use serde::Deserialize;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::cli::Cli;
 use crate::r10_simulation as r10_sim;
 use crate::reacquisition_distribution::{ReacquisitionPoisson, SampleDist};
 use crate::read_length_distribution::ReadLengthDist;
@@ -57,8 +56,8 @@ use crate::services::minknow_api::data::{
     get_live_reads_request, get_live_reads_response, GetDataTypesRequest, GetDataTypesResponse,
     GetLiveReadsRequest, GetLiveReadsResponse,
 };
-use crate::PoreType;
-use crate::{Config, Sample, _load_toml};
+use crate::config::PoreType;
+use crate::config::{Config, Sample};
 
 /// unused
 #[derive(Debug)]
@@ -298,7 +297,7 @@ fn get_barcode_squiggle(
         PoreType::R10 => "_R10",
         PoreType::R9 => "",
     };
-    info!(
+    log::info!(
         "Fetching barcode squiggle for barcode {} at {}",
         barcode,
         format!(
@@ -414,7 +413,7 @@ fn start_write_out_thread(
                 );
                 // drain 4000 reads and write them into a FAST5 file
                 let mut multi = MultiFast5File::new(fast5_file_name.clone(), OpenMode::Append);
-                info!("Writing out file to {}", fast5_file_name);
+                log::info!("Writing out file to {}", fast5_file_name);
                 let range_end = std::cmp::min(4000, read_infos.len());
                 for to_write_info in read_infos.drain(..range_end) {
                     // skip this read if we are trying to write it out twice
@@ -430,9 +429,9 @@ fn start_write_out_thread(
                         new_end = min(stop, to_write_info.read.len());
                     }
                     let signal = to_write_info.read[0..new_end].to_vec();
-                    debug!("{to_write_info:#?}");
+                    log::debug!("{to_write_info:#?}");
                     if signal.is_empty() {
-                        error!("Attempt to write empty signal");
+                        log::error!("Attempt to write empty signal");
                         continue;
                     };
                     let raw_attrs: HashMap<&str, RawAttrsOpts> = HashMap::from([
@@ -485,7 +484,7 @@ fn start_write_out_thread(
             }
             thread::sleep(Duration::from_millis(1));
         }
-        info!("exiting write out thread");
+        log::info!("exiting write out thread");
     });
     complete_read_tx
 }
@@ -516,7 +515,7 @@ fn start_unblock_thread(
             };
             total_unblocks += unblock_proc;
             total_sr += stop_rec_proc;
-            info!(
+            log::info!(
                 "Unblocked: {}, Stop receiving: {}, Total unblocks {}, total sr {}",
                 unblock_proc, stop_rec_proc, total_unblocks, total_sr
             );
@@ -533,7 +532,7 @@ fn setup(
     setup_arc: Arc<Mutex<RunSetup>>,
 ) -> (usize, usize, usize) {
     let mut setup = setup_arc.lock().unwrap();
-    info!("Received stream setup, setting up.");
+    log::info!("Received stream setup, setting up.");
     if let get_live_reads_request::Request::Setup(_h) = setuppy {
         setup.first = _h.first_channel;
         setup.last = _h.last_channel;
@@ -555,7 +554,7 @@ fn take_actions(
     read_numbers_actioned: &mut [u32; 3000],
 ) -> (usize, usize, usize) {
     // check that we have an action type and not a setup, whihc should be impossible
-    debug!("Processing non setup actions");
+    log::debug!("Processing non setup actions");
     let (unblocks_processed, stop_rec_processed) = match action_request {
         get_live_reads_request::Request::Actions(actions) => {
             // let mut add_response = response_carrier.lock().unwrap();
@@ -620,11 +619,11 @@ fn unblock_reads(
     if let action::Read::Number(read_num) = read_number {
         // check if the last read_num we performed an action on isn't this one, on this channel
         if channel_num_to_read_num[channel_number] == read_num {
-            // Debug!("Ignoring second unblock! on read {}", read_num);
+            // log::debug!("Ignoring second unblock! on read {}", read_num);
             return (None, 0, 0);
         }
         if read_num != value.read_number {
-            // Debug!("Ignoring unblock for old read");
+            // log::debug!("Ignoring unblock for old read");
             return (None, 0, 0);
         }
         // if we are dealing with a new read, set the new read num as the last dealt with read num ath this channel number
@@ -679,7 +678,7 @@ pub trait FileExtension {
 impl<P: AsRef<Path>> FileExtension for P {
     fn has_extension<S: AsRef<str>>(&self, extensions: &[S]) -> bool {
         return extensions.iter().any(|x| {
-            debug!(
+            log::debug!(
                 "Extension being checked: {} Against {:#?}, {:#?}",
                 x.as_ref(),
                 self.as_ref(),
@@ -698,7 +697,7 @@ impl<P: AsRef<Path>> FileExtension for P {
     }
 
     fn is_fasta(&self) -> bool {
-        info!("{:#?}", &self.as_ref());
+        log::info!("{:#?}", &self.as_ref());
         return self.as_ref().has_extension(&[
             ".fasta",
             ".fna",
@@ -756,7 +755,7 @@ fn process_samples_from_config(
             for entry in t {
                 // only read files that are .npy squiggle
                 if entry.path().extension().unwrap().to_str().unwrap() == "npy" {
-                    info!("Reading view for{:#?}", entry.path());
+                    log::info!("Reading view for{:#?}", entry.path());
                     read_views_of_squiggle_data(
                         &mut views,
                         &entry.path().clone(),
@@ -764,7 +763,7 @@ fn process_samples_from_config(
                         sample,
                     );
                 } else if entry.path().is_fasta() {
-                    info!("Reading view of sequence for {:#?}", entry.path());
+                    log::info!("Reading view of sequence for {:#?}", entry.path());
                     read_views_of_sequence_data(
                         &mut views,
                         &sample.input_genome.clone(),
@@ -809,7 +808,7 @@ fn process_samples_from_config(
             }
         // only a path to a single file has been passed
         } else {
-            debug!("{:#?}", sample);
+            log::debug!("{:#?}", sample);
             if sample.input_genome.is_fasta() {
                 read_views_of_sequence_data(
                     &mut views,
@@ -912,7 +911,7 @@ fn read_views_of_sequence_data(
     sample_info: &Sample,
     kmers: &HashMap<String, f64, std::hash::BuildHasherDefault<fnv::FnvHasher>>,
 ) {
-    info!(
+    log::info!(
         "Reading sequence information for {:#?} for sample {:#?} MAY TAKE SOME TIME",
         file_path.file_name(),
         sample_info
@@ -925,7 +924,7 @@ fn read_views_of_sequence_data(
     while reader.next().is_some() {
         num_seq += 1;
     }
-    info!("Simulating for {num_seq} sequences");
+    log::info!("Simulating for {num_seq} sequences");
     let mut reader: Box<dyn FastxReader> =
         parse_fastx_file(file_path).expect("Can't find FASTA file at {file_path}");
     let now = Instant::now();
@@ -933,7 +932,7 @@ fn read_views_of_sequence_data(
     while let Some(record) = reader.next() {
         let per_record_now = Instant::now();
         let fasta_record = record.unwrap();
-        info!(
+        log::info!(
             "Converting {}",
             String::from_utf8(fasta_record.id().to_vec()).unwrap()
         );
@@ -955,13 +954,13 @@ fn read_views_of_sequence_data(
             ));
         sample.files.push(file_info);
         done += 1;
-        info!(
+        log::info!(
             "Finished converting {done} of {num_seq} in {} seconds",
             per_record_now.elapsed().as_secs_f64()
         );
     }
     let _end = now.elapsed().as_secs_f64();
-    info!("Read reference into squiggle in {} seconds", _end);
+    log::info!("Read reference into squiggle in {} seconds", _end);
 }
 
 /// Creates Memory mapped views of the precalculated numpy arrays of squiggle for reference genomes, generated by make_squiggle.py
@@ -974,7 +973,7 @@ fn read_views_of_squiggle_data(
     global_mean_read_length: Option<f64>,
     sample_info: &Sample,
 ) {
-    info!(
+    log::info!(
         "Reading squiggle information for {:#?} for sample {:#?}",
         file_info.file_name(),
         sample_info
@@ -1177,7 +1176,7 @@ impl DataServiceServicer {
         let break_chunks_ms: u64 = config.parameters.get_chunk_size_ms();
         let start_time: u64 = Utc::now().timestamp() as u64;
         let barcode_squig = create_barcode_squig_hashmap(&config);
-        info!("Barcodes available {:#?}", barcode_squig.keys());
+        log::info!("Barcodes available {:#?}", barcode_squig.keys());
         let safe: Arc<Mutex<Vec<ReadInfo>>> =
             Arc::new(Mutex::new(Vec::with_capacity(channel_size)));
         let action_response_safe: Arc<Mutex<Vec<get_live_reads_response::ActionResponse>>> =
@@ -1199,17 +1198,17 @@ impl DataServiceServicer {
             setup_channel_vec(channel_size, &thread_safe, &mut rng, working_pore_percent);
         let death_chance = config.calculate_death_chance(starting_functional_pore_count);
         let mut time_logged_at: f64 = 0.0;
-        info!("Death chances {:#?}", death_chance);
+        log::info!("Death chances {:#?}", death_chance);
 
         if data_run_time > 0 {
-            warn!("Maximum run time for data generation set to {} seconds", data_run_time)
+            log::warn!("Maximum run time for data generation set to {} seconds", data_run_time)
         }
 
         // start the thread to generate data
         thread::spawn(move || {
 
             if data_delay > 0 {
-                info!("Delay data generation by {} seconds...", &data_delay);
+                log::info!("Delay data generation by {} seconds...", &data_delay);
                 thread::sleep(std::time::Duration::from_secs(data_delay.clone()));
             }
 
@@ -1222,7 +1221,7 @@ impl DataServiceServicer {
             // Infinte loop for data generation
             loop {
                 let read_process = Instant::now();
-                debug!("Sequencer mock loop start");
+                log::debug!("Sequencer mock loop start");
                 let mut new_reads = 0;
                 let mut dead_pores = 0;
                 let mut empty_pores = 0;
@@ -1256,7 +1255,7 @@ impl DataServiceServicer {
                     let read_estimated_finish_time = value.start_time_seconds + value.duration;
                     // experiment_time is the time the experimanet has started until now
                     let experiment_time = Utc::now().timestamp() as u64 - start_time;
-                    // info!("exp time: {}, read_finish_time: {}, is exp greater {}", experiment_time, read_estimated_finish_time, experiment_time as usize > read_estimated_finish_time);
+                    // log::info!("exp time: {}, read_finish_time: {}, is exp greater {}", experiment_time, read_estimated_finish_time, experiment_time as usize > read_estimated_finish_time);
                     // We should deal with this read as if it had finished
                     if experiment_time as usize > read_estimated_finish_time || value.was_unblocked
                     {
@@ -1313,10 +1312,10 @@ impl DataServiceServicer {
                         }
                     }
                 }
-                // ES - around 10ms - a little latency for read processing overhead but cannot explain larger component - warn!("Generated reads in {} ms", read_process.elapsed().as_millis());
+                // ES - around 10ms - a little latency for read processing overhead but cannot explain larger component - log::warn!("Generated reads in {} ms", read_process.elapsed().as_millis());
                 let _end = now.elapsed().as_secs_f64();
                 if _end.ceil() > time_logged_at {
-                    info!(
+                    log::info!(
                         "New reads: {}, Occupied: {}, Empty pores: {}, Dead pores: {}, Sequenced reads: {}, Awaiting: {}",
                         new_reads, occupied, empty_pores, dead_pores, completed_reads, awaiting_reacquisition
                     );
@@ -1333,7 +1332,7 @@ impl DataServiceServicer {
                 // Maximum run time of data generation
                 if data_run_time > 0 {
                     if now.elapsed().as_secs() >= data_run_time+data_delay {
-                        warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
+                        log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
                         {
                             let mut x = end_run_time_gracefully.lock().unwrap();
                             *x = true;
@@ -1460,17 +1459,17 @@ impl DataService for DataServiceServicer {
                         // get the channel data vec
                         // The below code block allows us to unlock a syncronous Arc Mutex across an asyncronous await.
                         let mut read_data_vec = {
-                            debug!("Getting GRPC lock {:#?}", now2.elapsed().as_millis());
+                            log::debug!("Getting GRPC lock {:#?}", now2.elapsed().as_millis());
                             let mut z1 = data_lock.lock().unwrap();
-                            debug!("Got GRPC lock {:#?}", now2.elapsed().as_millis());
+                            log::debug!("Got GRPC lock {:#?}", now2.elapsed().as_millis());
                             z1
                         };
                         // println!("Process {} ({} - {})", &uuid, &range.start, &range.end);
                         
                         // let (channel_start_index, channel_end_index) = {
-                            // debug!("Getting setup lock {:#?}", now2.elapsed().as_millis());
+                            // log::debug!("Getting setup lock {:#?}", now2.elapsed().as_millis());
                             // let mut setup_guard = setup.lock().unwrap();
-                            // debug!("Got setup lock {:#?}", now2.elapsed().as_millis());
+                            // log::debug!("Got setup lock {:#?}", now2.elapsed().as_millis());
 
                             // // println!("ArcMutex of setup configuration: {} {}", setup_guard.first, setup_guard.last)
                             // (setup_guard.first as usize - 1, setup_guard.last as usize)
@@ -1484,7 +1483,7 @@ impl DataService for DataServiceServicer {
                             
 
                             let mut read_info = read_data_vec.get_mut(i).unwrap();
-                            debug!("Elapsed at start of drain {}", now2.elapsed().as_millis());
+                            log::debug!("Elapsed at start of drain {}", now2.elapsed().as_millis());
                             if !read_info.stop_receiving && !read_info.was_unblocked && read_info.read.len() > 0 {
                                 // work out where to start and stop our slice of signal
                                 let mut start = read_info.prev_chunk_start;

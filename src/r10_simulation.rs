@@ -136,14 +136,14 @@ pub fn convert_to_signal(
     for kmer in record.kmers(9) {
         let mut kmer = String::from_utf8(kmer.to_vec()).unwrap();
         kmer = replace_char_with_base(&kmer, None);
-        debug!("{kmer}");
+        log::debug!("{kmer}");
         let value = kmers.get(&kmer.to_uppercase()).unwrap_or_else(|| {
             panic!(
                 "failed to retrieve value for kmer {kmer}, on contig{}",
                 String::from_utf8(record.id().to_vec()).unwrap()
             )
         });
-        debug!("{value}");
+        log::debug!("{value}");
 
         let x = (value * profile.digitisation) / profile.range;
         // 10 sample for each base (sample_rate (4000) / base per second (400))
