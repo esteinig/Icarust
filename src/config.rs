@@ -1,6 +1,6 @@
 
 use std::path::PathBuf;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 
@@ -8,7 +8,7 @@ use crate::reacquisition_distribution::{DeathChance, _calculate_death_chance};
 use crate::read_length_distribution::ReadLengthDist;
 
 /// Holds the  type of the pore we are simulating
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub enum PoreType {
     /// R10 pore
     R10,
@@ -16,7 +16,7 @@ pub enum PoreType {
     R9,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Config {
     pub parameters: Parameters,
     pub sample: Vec<Sample>,
@@ -34,7 +34,6 @@ impl Config {
     pub fn get_working_pore_precent(&self) -> usize {
         self.working_pore_percent.unwrap_or(90)
     }
-
     /// Check that we have a valid pore type or return the default R10 pore.
     pub fn check_pore_type(&self) -> PoreType {
         match &self.pore_type {
@@ -117,9 +116,16 @@ impl Config {
             }
         }
     }
+
+    pub fn to_json(&self, file: &PathBuf) {
+        serde_json::to_writer(
+            &std::fs::File::create(&file).expect("Faile to create Icarust configuration file"), &self
+        ).expect("Failed to write Icarust configuration to file")
+    }
+
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Parameters {
     pub cert_dir: PathBuf,
     pub manager_port: u32,
@@ -140,7 +146,7 @@ impl Parameters {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Sample {
     pub name: String,
     pub input_genome: std::path::PathBuf,
