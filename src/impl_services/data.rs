@@ -1312,7 +1312,6 @@ impl DataServiceServicer {
                         }
                     }
                 }
-                // ES - around 10ms - a little latency for read processing overhead but cannot explain larger component - log::warn!("Generated reads in {} ms", read_process.elapsed().as_millis());
                 let _end = now.elapsed().as_secs_f64();
                 if _end.ceil() > time_logged_at {
                     log::info!(
@@ -1337,8 +1336,7 @@ impl DataServiceServicer {
                             let mut x = end_run_time_gracefully.lock().unwrap();
                             *x = true;
                         }
-                        std::thread::sleep(Duration::from_millis(2000));
-                        std::process::exit(0);
+                        break;
                     }
                 }
                 

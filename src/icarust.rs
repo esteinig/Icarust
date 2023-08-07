@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use chrono::Utc;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use uuid::Uuid;
 
@@ -67,6 +66,7 @@ impl Icarust {
         // Graceful shutdown
         let graceful_shutdown = Arc::new(Mutex::new(false));
         let graceful_shutdown_clone = Arc::clone(&graceful_shutdown);
+        let graceful_shutdown_main= Arc::clone(&graceful_shutdown);
 
         // Create the position server for our one position.
         let log_svc = LogServiceServer::new(Log {});
@@ -80,7 +80,6 @@ impl Icarust {
             self.run_id.clone(), self.output_path.clone(),
         ));
 
-
         let data_service_server = DataServiceServer::new(DataServiceServicer::new(
             self.run_id.clone(),
             &self.config,
@@ -90,22 +89,15 @@ impl Icarust {
             data_delay,
             data_runtime
         ));
-        
-        ctrlc::set_handler(move || {
-            {
-                let mut x = graceful_shutdown.lock().unwrap();
-                *x = true;
-            }
-            std::thread::sleep(Duration::from_millis(2000));
-            std::process::exit(0);
-        })
-            .expect("FAILED TO CATCH SIGNAL SOMWHOW");
-
             
         let tls_position = self.get_tls_config();
         let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
 
-        Server::builder()
+        // Send of the main server as well - this allows us to check for the
+        // graceful shutdown Mutex and shutdown the main run routine as well
+        tokio::spawn(async move {
+
+            Server::builder()
             .tls_config(tls_position)
             .unwrap()
             .concurrency_limit_per_connection(256)
@@ -117,7 +109,31 @@ impl Icarust {
             .add_service(protocol_svc)
             .add_service(data_service_server)
             .serve(addr_position)
-            .await?;
+            .await
+            .unwrap();
+        });
+
+
+        ctrlc::set_handler(move || {
+            {
+                let mut x = graceful_shutdown.lock().unwrap();
+                *x = true;
+            }
+            std::thread::sleep(Duration::from_millis(2000));
+        }).expect("FAILED TO CATCH SIGNAL SOMEWHOW");
+
+
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
+    
+        loop {
+            interval.tick().await;
+            let x = graceful_shutdown_main.lock().unwrap();
+            if *x {
+                log::info!("Received graceful shutdown signal in main routine");
+                std::thread::sleep(Duration::from_millis(2000));
+                break;
+            }
+        }
 
         Ok(())
     }
