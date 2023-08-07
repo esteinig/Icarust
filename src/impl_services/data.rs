@@ -727,10 +727,9 @@ fn process_samples_from_config(
     let sample_weights = read_sample_distribution(config);
     // Seeded rng for generated weighted dists
     let mut rng: rand::rngs::StdRng = rand::SeedableRng::seed_from_u64(config.get_rand_seed());
-    let kmer_string =
-        read_to_string("static/R10_model.tsv").expect("Failed to read kmers to string");
     let kmers = match config.check_pore_type() {
         PoreType::R10 => {
+            let kmer_string = read_to_string("static/R10_model.tsv").expect("Failed to read kmers to string");
             let (_, kmer_hashmap) =
                 r10_sim::parse_kmers(&kmer_string).expect("Failed to parse R10 kmers");
             Some(kmer_hashmap)
