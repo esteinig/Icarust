@@ -33,7 +33,7 @@ use futures::lock::Mutex as AsyncMutex;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::prelude::*;
 use fnv::FnvHashSet;
-use frust5_api::*;
+use crate::frust5_api::frust5::*;
 use memmap2::Mmap;
 use ndarray::{s, Array1, ArrayBase, ArrayView1, Dim, ViewRepr};
 use ndarray_npy::{read_npy, ReadNpyError, ViewNpyExt};
@@ -471,6 +471,7 @@ fn start_write_out_thread(
                             channel_info,
                             &raw_attrs,
                             signal,
+                            config.vbz_plugin.as_os_str()
                         )
                         .unwrap();
                 }

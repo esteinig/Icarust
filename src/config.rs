@@ -26,6 +26,7 @@ pub struct Config {
     pub target_yield: f64,
     pub working_pore_percent: Option<usize>,
     pub pore_type: Option<String>,
+    pub vbz_plugin: PathBuf,
     
 }
 
