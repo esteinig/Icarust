@@ -52,7 +52,7 @@ impl Icarust {
         let manager_service_server = self.get_manager_service_server();
 
         // Spawn an Async thread and send it off somewhere
-        tokio::spawn(async move {
+        let manager_handle = tokio::spawn(async move {
             Server::builder()
             .tls_config(tls_manager)
             .unwrap()
@@ -95,8 +95,7 @@ impl Icarust {
 
         // Send of the main server as well - this allows us to check for the
         // graceful shutdown Mutex and shutdown the main run routine as well
-        tokio::spawn(async move {
-
+        let data_handle = tokio::spawn(async move {
             Server::builder()
             .tls_config(tls_position)
             .unwrap()
@@ -130,7 +129,10 @@ impl Icarust {
             let x = graceful_shutdown_main.lock().unwrap();
             if *x {
                 log::info!("Received graceful shutdown signal in main routine");
-                std::thread::sleep(Duration::from_millis(2000));
+                // Added this since we may want to reuse the same struct and run method
+                data_handle.abort();
+                manager_handle.abort();
+                std::thread::sleep(Duration::from_secs(2));
                 break;
             }
         }
