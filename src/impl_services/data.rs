@@ -391,7 +391,7 @@ fn start_write_out_thread(
         let mut read_numbers_seen: FnvHashSet<String> =
             FnvHashSet::with_capacity_and_hasher(4000, Default::default());
         let mut file_counter = 0;
-        let output_dir = PathBuf::from(format!("{}/fast5_pass/", output_path.display()));
+        let output_dir = PathBuf::from(format!("{}/fast5_pass", output_path.display()));  // correction to get properly formatted file path
         if !output_dir.exists() {
             create_ouput_dir(&output_dir).unwrap();
         }
@@ -404,6 +404,7 @@ fn start_write_out_thread(
 
             // this isn't perfect. if we are finsihing up a run and have more than 4000 reads waiting to be written out, we will lose the excess reads over 4000
             if read_infos.len() >= 4000 || z {
+
                 let fast5_file_name = format!(
                     "{}/{}_pass_{}_{}.fast5",
                     &output_dir.display(),

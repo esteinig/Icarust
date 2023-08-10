@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use uuid::Uuid;
+use tokio::signal;
 
 use crate::impl_services::acquisition::Acquisition;
 use crate::impl_services::analysis_configuration::Analysis;
@@ -113,14 +114,22 @@ impl Icarust {
         });
 
 
-        ctrlc::set_handler(move || {
-            {
-                let mut x = graceful_shutdown.lock().unwrap();
-                *x = true;
-            }
-            std::thread::sleep(Duration::from_millis(2000));
-        }).expect("FAILED TO CATCH SIGNAL SOMEWHOW");
+        tokio::spawn(async move {
 
+            // Shutdown signal on manual termination
+            // this replaces the previous implementation
+            // due to multiple handler errors when running
+            // multiple setups
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    log::warn!("Received manual shutdown signal");
+                    {
+                        let mut x = graceful_shutdown.lock().unwrap();
+                        *x = true;
+                    }
+                },
+            }
+        });
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
     
