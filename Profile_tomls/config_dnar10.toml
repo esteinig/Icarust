@@ -2,6 +2,8 @@ output_path = "/tmp/"
 target_yield = 100000000000
 pore_type = "R10"
 nucleotide_type = "DNA"
+pod5 = false
+vbz_plugin = "static/vbz_plugin"
 
 [parameters]
 sample_name = "test"
@@ -11,6 +13,11 @@ experiment_duration_set = 4800
 device_id = "Bantersaurus"
 position = "FenceSitter"
 sample_rate = 4000
+
+cert_dir = "static/tls_certs"
+channels = 512
+manager_port = 10000
+position_port = 10001
 
 [[sample]]
 name = "Bacteria 1"

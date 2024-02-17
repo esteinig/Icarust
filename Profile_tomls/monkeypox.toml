@@ -1,5 +1,7 @@
 output_path = "/tmp/"
 pore_type = "R9"
+pod5 = false
+vbz_plugin = "static/vbz_plugin"
 
 [parameters]
 sample_name = "test"
@@ -8,6 +10,11 @@ flowcell_name = "FAQ1234"
 experiment_duration_set = 4800
 device_id = "Bantersaurus"
 position = "FenceSitter"
+
+cert_dir = "static/tls_certs"
+channels = 512
+manager_port = 10000
+position_port = 10001
 
 [[sample]]
 input_genome = "squiggle_arrs/monkeypox/"

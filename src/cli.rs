@@ -20,10 +20,10 @@ pub struct Cli {
     #[clap(short, long)]
     pub pod5: bool,
     /// Data generator thread delay in seconds
-    #[clap(short, long)]
+    #[clap(short, long, default_value="0")]
     pub data_delay: u64,
     /// Data generator thread run time in minutes
-    #[clap(short, long)]
+    #[clap(short='r', long, default_value="0")]
     pub data_run_time: u64,
 }
 

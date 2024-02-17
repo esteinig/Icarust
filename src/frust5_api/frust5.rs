@@ -133,7 +133,7 @@ impl MultiFast5File {
     /// # Examples
     /// ```
     /// ```
-    pub fn new(filename: String, mode: OpenMode) -> MultiFast5File {
+    pub fn new(filename: String, mode: OpenMode) -> Self {
         let file = match mode {
             OpenMode::Append => {
                 let file = File::with_options()
@@ -159,7 +159,7 @@ impl MultiFast5File {
                 File::open("FAL37440_pass_5e83140e_100.fast5").unwrap() // open for reading
             }
         };
-        MultiFast5File {
+        Self {
             filename: filename.clone(),
             mode,
             handle: file,
@@ -168,7 +168,7 @@ impl MultiFast5File {
     }
     /// Diverged from ONT come back and straight up rework
     /// Create and empty read group, and populate all the fields for it. MISNOMER - doesn't return an empty read, returns a populated read.
-    pub fn create_empty_read(
+    pub fn create_populated_read(
         &mut self,
         read_id: String,
         run_id: String,

@@ -529,8 +529,8 @@ fn start_write_out_thread(
                                 config.parameters.get_sample_rate() as f64,
                                 to_write_info.channel_number.clone(),
                             );
-                            multi
-                                .create_empty_read(
+                           if let Err(_) = multi
+                                .create_populated_read(
                                     to_write_info.read_id.clone(),
                                     run_id.clone(),
                                     &tracking_id,
@@ -540,7 +540,10 @@ fn start_write_out_thread(
                                     signal,
                                     config.vbz_plugin.as_os_str()
                                 )
-                                .unwrap();
+                                {   
+                                    log::debug!("Read creation during Fast5 file write-out failed! Nothing to see here, citizen...");
+                                    continue; // handle error when writing the Fast5 file
+                                }; 
                         }
                         OutputFileType::Pod5(ref mut pod5) => {
                             let end_reason = if to_write_info.was_unblocked {
