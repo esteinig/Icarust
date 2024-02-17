@@ -1286,6 +1286,7 @@ fn generate_read(
     start_time: &u64,
     barcode_squig: &HashMap<String, (Vec<i16>, Vec<i16>)>,
     sampling: u64,
+    config: &Config,
 ) {
     // set stop receieivng to false so we don't accidentally not send the read
     value.stop_receiving = false;
@@ -1365,7 +1366,7 @@ fn generate_read(
         }
         (NucleotideType::DNA, PoreType::R10) | (NucleotideType::RNA, PoreType::R9) => {
             // generate a prefix
-            let mut prefix = simulation::generate_prefix().expect("NO PREFIX BAD");
+            let mut prefix = simulation::generate_prefix(&config).expect("NO PREFIX BAD");
             //  read the signal here
             let mut read_squig = file_info
                 .sequence
@@ -1447,6 +1448,9 @@ impl DataServiceServicer {
         if data_run_time > 0 {
             log::warn!("Maximum run time for data generation set to {} seconds", data_run_time)
         }
+
+        // ES: added for configurable prefix squiggle path
+        let config_clone = config.clone();
 
         // start the thread to generate data
         thread::spawn(move || {
@@ -1553,6 +1557,7 @@ impl DataServiceServicer {
                                 &start_time,
                                 &barcode_squig,
                                 sampling,
+                                &config_clone
                             )
                         }
                     }

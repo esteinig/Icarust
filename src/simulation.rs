@@ -24,6 +24,8 @@ use std::error::Error;
 use std::fs::File;
 use std::path::Path;
 
+use crate::config::Config;
+
 lazy_static! {
     static ref HASHSET: FnvHashSet<char> = {
         let mut set = FnvHashSet::default();
@@ -207,8 +209,8 @@ pub fn parse_kmers(
 }
 
 /// Generate signal for a stall sequence and adpator DNA
-pub fn generate_prefix() -> Result<Vec<i16>, Box<dyn Error>> {
-    let file = File::open("static/prefix.squiggle.npy").unwrap();
+pub fn generate_prefix(config: &Config) -> Result<Vec<i16>, Box<dyn Error>> {
+    let file = File::open(&config.prefix_squiggle).unwrap();
     let mmap = unsafe { Mmap::map(&file).unwrap() };
     let view: Vec<i16> = ArrayView1::<i16>::view_npy(&mmap).unwrap().to_vec();
     Ok(view)

@@ -40,7 +40,9 @@ pub struct Config {
     // ES: Added plugin path to configuration file for Frust5 integration
     pub vbz_plugin: PathBuf,
     // ES: Added k-mer model data as configurable path
-    pub kmer_model: PathBuf
+    pub kmer_model: PathBuf,
+    // ES: Added prefix squiggle as configurable path
+    pub prefix_squiggle: PathBuf
     // My apologies Rory, it probably didn't have source code published for a reason, 
     // but needed to modify the plugin path for config to use Icarust as a library
 }
