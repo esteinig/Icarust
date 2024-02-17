@@ -15,7 +15,7 @@ impl LogService for Log {
         &self,
         _request: Request<SendUserMessageRequest>,
     ) -> Result<Response<SendUserMessageResponse>, Status> {
-        info!("{:#?}", _request.into_inner().user_message);
+        log::info!("{:#?}", _request.into_inner().user_message);
         Ok(Response::new(SendUserMessageResponse {}))
     }
 }

@@ -19,6 +19,12 @@ pub struct Cli {
     /// Write out pod5 files
     #[clap(short, long)]
     pub pod5: bool,
+    /// Data generator thread delay in seconds
+    #[clap(short, long)]
+    pub data_delay: u64,
+    /// Data generator thread run time in minutes
+    #[clap(short, long)]
+    pub data_run_time: u64,
 }
 
 impl Cli {

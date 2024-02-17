@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 #![deny(missing_doc_code_examples)]
 #![allow(clippy::too_many_arguments)]
 //! This module contains all the code to create a new DataServiceServicer, which spawns a data generation thread that acts an approximation of a sequencer.
@@ -12,6 +12,9 @@
 //!
 //!
 //!
+
+use futures::lock::Mutex as AsyncMutex;
+
 use futures::{Stream, StreamExt};
 use needletail::{parse_fastx_file, FastxReader};
 use podders::reads::{EndReason, PoreType as PodPoreType, ReadInfo as PodReadInfo};
@@ -45,7 +48,6 @@ use serde::Deserialize;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::cli::Cli;
 use crate::reacquisition_distribution::{ReacquisitionPoisson, SampleDist};
 use crate::read_length_distribution::ReadLengthDist;
 use crate::services::minknow_api::data::data_service_server::DataService;
@@ -56,10 +58,8 @@ use crate::services::minknow_api::data::{
     get_live_reads_request, get_live_reads_response, GetDataTypesRequest, GetDataTypesResponse,
     GetLiveReadsRequest, GetLiveReadsResponse,
 };
-use crate::simulation::{KmerType, SimType};
-use crate::PoreType;
-use crate::{simulation, NucleotideType};
-use crate::{Config, Sample, _load_toml};
+use crate::simulation::{self, KmerType, SimType};
+use crate::config::{Config, Sample, PoreType, NucleotideType};
 
 /// unused
 #[derive(Debug)]
@@ -304,7 +304,7 @@ fn get_barcode_squiggle(
         PoreType::R10 => "_R10",
         PoreType::R9 => "_R9",
     };
-    info!(
+    log::info!(
         "Fetching barcode squiggle for barcode {} at {}",
         barcode,
         format!(
@@ -334,18 +334,17 @@ enum OutputFileType {
 /// Start the thread that will handle writing out the FAST5 file,
 fn start_write_out_thread(
     run_id: String,
-    config: Cli,
+    config: &Config,
     output_path: PathBuf,
     write_out_gracefully: Arc<Mutex<bool>>,
 ) -> SyncSender<ReadInfo> {
     let (complete_read_tx, complete_read_rx) = sync_channel(8000);
-    let x = config;
+    let config = config.clone();
 
     thread::spawn(move || {
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
         let exp_start_time = Utc::now();
         let iso_time = exp_start_time.to_rfc3339_opts(SecondsFormat::Millis, false);
-        let config = _load_toml(&x.simulation_profile);
         let sample_rate = config.parameters.get_sample_rate().to_string();
         let ic_pt = config.check_pore_type();
         let experiment_duration = config.get_experiment_duration_set().to_string();
@@ -413,7 +412,7 @@ fn start_write_out_thread(
         }
         // loop to collect reads and write out files
         loop {
-            let run_info = if x.pod5 {
+            let run_info = if config.pod5 {
                 Some(RunInfoData {
                     acquisition_id: run_id.clone(),
                     acquisition_start_time: 1625097600000,
@@ -451,7 +450,7 @@ fn start_write_out_thread(
             let z = { *write_out_gracefully.lock().unwrap() };
 
             if read_infos.len() >= 4000 || z {
-                let extension = if x.pod5 { ".pod5" } else { ".fast5" };
+                let extension = if config.pod5 { ".pod5" } else { ".fast5" };
                 let output_file_name = format!(
                     "{}/{}_pass_{}_{}{}",
                     &output_dir.display(),
@@ -461,7 +460,7 @@ fn start_write_out_thread(
                     extension
                 );
                 // drain 4000 reads and write them into a FAST5 file
-                let mut out_file = if x.pod5 {
+                let mut out_file = if config.pod5 {
                     let mut pod = Pod5File::new(&output_file_name).unwrap();
                     pod.push_run_info(run_info.unwrap());
                     pod.write_run_info_to_ipc();
@@ -472,12 +471,12 @@ fn start_write_out_thread(
                         OpenMode::Append,
                     ))
                 };
-                info!("Writing out file to {}", output_file_name);
+                log::info!("Writing out file to {}", output_file_name);
                 let range_end = std::cmp::min(4000, read_infos.len());
                 for to_write_info in read_infos.drain(..range_end) {
                     // skip this read if we are trying to write it out twice
                     if !read_numbers_seen.insert(to_write_info.read_id.clone()) {
-                        warn!("Read seen twice?");
+                        log::warn!("Read seen twice?");
                         continue;
                     }
                     let mut new_end = to_write_info.read.len();
@@ -494,9 +493,9 @@ fn start_write_out_thread(
                     let signal = to_write_info.read[0..new_end].to_vec();
 
                     let num_samples = signal.len() as u64;
-                    debug!("{to_write_info:#?}");
+                    log::debug!("{to_write_info:#?}");
                     if signal.is_empty() {
-                        error!("Attempt to write empty signal");
+                        log::error!("Attempt to write empty signal");
                         continue;
                     };
 
@@ -595,7 +594,7 @@ fn start_write_out_thread(
             }
             thread::sleep(Duration::from_millis(1));
         }
-        info!("exiting write out thread");
+        log::info!("exiting write out thread");
     });
     complete_read_tx
 }
@@ -626,7 +625,7 @@ fn start_unblock_thread(
             };
             total_unblocks += unblock_proc;
             total_sr += stop_rec_proc;
-            info!(
+            log::info!(
                 "Unblocked: {}, Stop receiving: {}, Total unblocks {}, total sr {}",
                 unblock_proc, stop_rec_proc, total_unblocks, total_sr
             );
@@ -643,7 +642,7 @@ fn setup(
     setup_arc: Arc<Mutex<RunSetup>>,
 ) -> (usize, usize, usize) {
     let mut setup = setup_arc.lock().unwrap();
-    info!("Received stream setup, setting up.");
+    log::info!("Received stream setup, setting up.");
     if let get_live_reads_request::Request::Setup(_h) = setuppy {
         setup.first = _h.first_channel;
         setup.last = _h.last_channel;
@@ -665,7 +664,7 @@ fn take_actions(
     read_numbers_actioned: &mut [u32; 3000],
 ) -> (usize, usize, usize) {
     // check that we have an action type and not a setup, whihc should be impossible
-    debug!("Processing non setup actions");
+    log::debug!("Processing non setup actions");
     let (unblocks_processed, stop_rec_processed) = match action_request {
         get_live_reads_request::Request::Actions(actions) => {
             // let mut add_response = response_carrier.lock().unwrap();
@@ -675,6 +674,10 @@ fn take_actions(
             // iterate a vec of Action
             let mut read_infos = channel_read_info.lock().unwrap();
             for action in actions.actions {
+                // ES: Action can be optional on RPC specification. Added a continue statement.
+                if let None = action.action {
+                    continue;
+                }
                 let action_type = action.action.unwrap();
                 let zero_index_channel = action.channel as usize - 1;
                 let (_action_response, unblock_count, stopped_count) = match action_type {
@@ -726,11 +729,11 @@ fn unblock_reads(
     if let action::Read::Number(read_num) = read_number {
         // check if the last read_num we performed an action on isn't this one, on this channel
         if channel_num_to_read_num[channel_number] == read_num {
-            // Debug!("Ignoring second unblock! on read {}", read_num);
+            // log::debug!("Ignoring second unblock! on read {}", read_num);
             return (None, 0, 0);
         }
         if read_num != value.read_number {
-            // Debug!("Ignoring unblock for old read");
+            // log::debug!("Ignoring unblock for old read");
             return (None, 0, 0);
         }
         // if we are dealing with a new read, set the new read num as the last dealt with read num ath this channel number
@@ -786,7 +789,7 @@ pub trait FileExtension {
 impl<P: AsRef<Path>> FileExtension for P {
     fn has_extension<S: AsRef<str>>(&self, extensions: &[S]) -> bool {
         return extensions.iter().any(|x| {
-            debug!(
+            log::debug!(
                 "Extension being checked: {} Against {:#?}, {:#?}",
                 x.as_ref(),
                 self.as_ref(),
@@ -805,7 +808,7 @@ impl<P: AsRef<Path>> FileExtension for P {
     }
 
     fn is_fasta(&self) -> bool {
-        info!("{:#?}", &self.as_ref());
+        log::info!("{:#?}", &self.as_ref());
         return self.as_ref().has_extension(&[
             ".fasta",
             ".fna",
@@ -823,7 +826,7 @@ impl<P: AsRef<Path>> FileExtension for P {
     }
 
     fn is_npy(&self) -> bool {
-        info!("{:#?}", &self.as_ref());
+        log::info!("{:#?}", &self.as_ref());
         return self.as_ref().has_extension(&[".npy"]);
     }
 }
@@ -915,7 +918,7 @@ fn process_samples_from_config(
             for entry in t {
                 // only read files that are .npy squiggle
                 if entry.path().is_npy() {
-                    info!("Reading view for{:#?}", entry.path());
+                    log::info!("Reading view for{:#?}", entry.path());
                     read_views_of_squiggle_data(
                         &mut views,
                         &entry.path().clone(),
@@ -924,7 +927,7 @@ fn process_samples_from_config(
                         config.parameters.get_sample_rate(),
                     );
                 } else if entry.path().is_fasta() {
-                    info!("Reading view of sequence for {:#?}", entry.path());
+                    log::info!("Reading view of sequence for {:#?}", entry.path());
                     read_views_of_sequence_data(
                         &mut views,
                         &sample.input_genome.clone(),
@@ -982,7 +985,7 @@ fn process_samples_from_config(
             }
         // only a path to a single file has been passed
         } else {
-            debug!("{:#?}", sample);
+            log::debug!("{:#?}", sample);
             if sample.input_genome.is_fasta() {
                 read_views_of_sequence_data(
                     &mut views,
@@ -1003,7 +1006,7 @@ fn process_samples_from_config(
                     config.parameters.get_sample_rate(),
                 );
             } else {
-                debug!("Sorry unsupported format!");
+                log::debug!("Sorry unsupported format!");
             }
 
             let sample_info = views.get_mut(&sample.name).unwrap();
@@ -1116,7 +1119,7 @@ fn read_views_of_sequence_data(
     pore_type: PoreType,
     nucleotide_type: NucleotideType,
 ) {
-    info!(
+    log::info!(
         "Reading sequence information for {:#?} for sample {:#?} MAY TAKE SOME TIME",
         file_path.file_name(),
         sample_info
@@ -1131,7 +1134,7 @@ fn read_views_of_sequence_data(
     };
     let profile = simulation::get_sim_profile(sim_type);
     let num_seq = simulation::num_sequences(file_path);
-    info!("Simulating for {num_seq} sequences");
+    log::info!("Simulating for {num_seq} sequences");
     let mut reader: Box<dyn FastxReader> =
         parse_fastx_file(file_path).expect("Can't find FASTA file at {file_path}");
     let now = Instant::now();
@@ -1139,7 +1142,7 @@ fn read_views_of_sequence_data(
     while let Some(record) = reader.next() {
         let per_record_now = Instant::now();
         let fasta_record = record.unwrap();
-        info!(
+        log::info!(
             "Converting {}",
             String::from_utf8(fasta_record.id().to_vec()).unwrap()
         );
@@ -1162,13 +1165,13 @@ fn read_views_of_sequence_data(
             ));
         sample.files.push(file_info);
         done += 1;
-        info!(
+        log::info!(
             "Finished converting {done} of {num_seq} in {} seconds",
             per_record_now.elapsed().as_secs_f64()
         );
     }
     let _end = now.elapsed().as_secs_f64();
-    info!("Read reference into squiggle in {} seconds", _end);
+    log::info!("Read reference into squiggle in {} seconds", _end);
 }
 
 /// Creates Memory mapped views of the precalculated numpy arrays of squiggle for reference genomes, generated by make_squiggle.py
@@ -1182,7 +1185,7 @@ fn read_views_of_squiggle_data(
     sample_info: &Sample,
     sampling: u64,
 ) {
-    info!(
+    log::info!(
         "Reading squiggle information for {:#?} for sample {:#?}",
         file_info.file_name(),
         sample_info
@@ -1398,20 +1401,21 @@ fn generate_read(
 impl DataServiceServicer {
     pub fn new(
         run_id: String,
-        cli_opts: Cli,
+        config: &Config,
         output_path: PathBuf,
         channel_size: usize,
         graceful_shutdown: Arc<Mutex<bool>>,
+        data_delay: u64,   // seconds
+        data_run_time: u64 // seconds
     ) -> DataServiceServicer {
         let now = Instant::now();
-        let config = _load_toml(&cli_opts.simulation_profile);
 
         let working_pore_percent = config.get_working_pore_precent();
         let break_chunks_ms: u64 = config.parameters.get_chunk_size_ms();
         let sampling: u64 = config.parameters.get_sample_rate();
         let start_time: u64 = Utc::now().timestamp() as u64;
         let barcode_squig = create_barcode_squig_hashmap(&config);
-        info!("Barcodes available {:#?}", barcode_squig.keys());
+        log::info!("Barcodes available {:#?}", barcode_squig.keys());
         let safe: Arc<Mutex<Vec<ReadInfo>>> =
             Arc::new(Mutex::new(Vec::with_capacity(channel_size)));
         let action_response_safe: Arc<Mutex<Vec<get_live_reads_response::ActionResponse>>> =
@@ -1425,17 +1429,29 @@ impl DataServiceServicer {
         let (views, dist) = process_samples_from_config(&config);
         let files: Vec<String> = views.keys().cloned().collect();
         let write_out_gracefully = Arc::clone(&graceful_shutdown);
-        let complete_read_tx =
-            start_write_out_thread(run_id, cli_opts, output_path, write_out_gracefully);
+        // Added for improved termination signal of run time when using Icarust runner
+        let end_run_time_gracefully = Arc::clone(&write_out_gracefully);
+        let complete_read_tx = start_write_out_thread(run_id, config, output_path, write_out_gracefully);
         let mut rng: StdRng = rand::SeedableRng::seed_from_u64(1234567);
 
         let starting_functional_pore_count =
             setup_channel_vec(channel_size, &thread_safe, &mut rng, working_pore_percent);
         let death_chance = config.calculate_death_chance(starting_functional_pore_count);
         let mut time_logged_at: f64 = 0.0;
-        info!("Death chances {:#?}", death_chance);
+        log::info!("Death chances {:#?}", death_chance);
+
+        if data_run_time > 0 {
+            log::warn!("Maximum run time for data generation set to {} seconds", data_run_time)
+        }
+
         // start the thread to generate data
         thread::spawn(move || {
+
+            if data_delay > 0 {
+                log::info!("Delay data generation by {} seconds...", &data_delay);
+                thread::sleep(std::time::Duration::from_secs(data_delay.clone()));
+            }
+
             let r: ReacquisitionPoisson = ReacquisitionPoisson::new(1.0, 0.0, 0.0001, 0.05);
 
             // read number for adding to unblock
@@ -1445,7 +1461,7 @@ impl DataServiceServicer {
             // Infinte loop for data generation
             loop {
                 let read_process = Instant::now();
-                debug!("Sequencer mock loop start");
+                log::debug!("Sequencer mock loop start");
                 let mut new_reads = 0;
                 let mut dead_pores = 0;
                 let mut empty_pores = 0;
@@ -1479,7 +1495,7 @@ impl DataServiceServicer {
                     let read_estimated_finish_time = value.start_time_seconds + value.duration;
                     // experiment_time is the time the experimanet has started until now
                     let experiment_time = Utc::now().timestamp() as u64 - start_time;
-                    // info!("exp time: {}, read_finish_time: {}, is exp greater {}", experiment_time, read_estimated_finish_time, experiment_time as usize > read_estimated_finish_time);
+                    // log::info!("exp time: {}, read_finish_time: {}, is exp greater {}", experiment_time, read_estimated_finish_time, experiment_time as usize > read_estimated_finish_time);
                     // We should deal with this read as if it had finished
                     if experiment_time as usize > read_estimated_finish_time || value.was_unblocked
                     {
@@ -1539,7 +1555,7 @@ impl DataServiceServicer {
                 }
                 let _end = now.elapsed().as_secs_f64();
                 if _end.ceil() > time_logged_at {
-                    info!(
+                    log::info!(
                         "New reads: {}, Occupied: {}, Empty pores: {}, Dead pores: {}, Sequenced reads: {}, Awaiting: {}",
                         new_reads, occupied, empty_pores, dead_pores, completed_reads, awaiting_reacquisition
                     );
@@ -1554,6 +1570,18 @@ impl DataServiceServicer {
                     *graceful_shutdown.lock().unwrap() = true;
                     break;
                 }
+                // ES- maximum run time of data generation
+                if data_run_time > 0 {
+                    if now.elapsed().as_secs() >= data_run_time+data_delay {
+                        log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
+                        {
+                            let mut x = end_run_time_gracefully.lock().unwrap();
+                            *x = true;
+                        }
+                        std::thread::sleep(Duration::from_millis(2000));
+                        std::process::exit(0);
+                    }
+                }
             }
         });
         // return our newly initialised DataServiceServicer to add onto the GRPC server
@@ -1564,6 +1592,21 @@ impl DataServiceServicer {
             break_chunks_ms,
             channel_size,
             sampling,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct ChannelRange {
+    pub start: usize,
+    pub end: usize
+}
+impl ChannelRange {
+    pub fn new(channel_size: &usize) -> Self {
+        Self {
+            start: 0,
+            end: channel_size.clone()
         }
     }
 }
@@ -1590,16 +1633,33 @@ impl DataService for DataServiceServicer {
         let sampling = self.sampling;
         let chunk_size = break_chunk_ms as f64 / 1000.0 * sampling as f64;
 
+        // Async mutex for channel range implementation
+        let channel_range = Arc::new(AsyncMutex::new(ChannelRange::new(&channel_size)));
+        let channel_range_clone = Arc::clone(&channel_range);
+
+        // ES: Really clever to have the threads inside the stream generator and push data back through a bounded queue to yield into the stream
+
         // Stream the responses back
         let output = async_stream::try_stream! {
             // Async channel that will await when it ahs one elemnt. This pushes the read response back immediately.
             let (tx_get_live_reads_response, mut rx_get_live_reads_response) = tokio::sync::mpsc::channel(1);
+
             // spawn an async thread that handles the incoming Get Live Reads Requests.
             //  This is spawned after we receive our first connection.
             tokio::spawn(async move {
                 while let Some(live_reads_request) = stream.next().await {
                     let now2 = Instant::now();
                     let live_reads_request = live_reads_request.unwrap();
+
+                    // ES: on initiation request get the channel range indices
+                    if let Some(get_live_reads_request::Request::Setup(setup_request)) = &live_reads_request.request {
+                        let mut range = channel_range.lock().await;
+
+                        range.start = setup_request.first_channel as usize - 1;  // indices for the loop below
+                        range.end = setup_request.last_channel as usize - 1;
+
+                        println!("ChannelRange {:?}", &range);
+                    }
                     // send all the actions we wish to take to action thread
                     // Unw
                     tx_unblocks.send(live_reads_request).unwrap();
@@ -1624,19 +1684,30 @@ impl DataService for DataServiceServicer {
                     // we serve 0.4 * 4000 (1600) samples
 
                     // The below code block allows us to Send the responses across an await.
-                    {
+                    {   
+
+                        let range = channel_range_clone.lock().await;
+
+                        // ES: We can seemingly access the Arc<Mutex<RunSetup>> in this block - interesting!
+                        // ES: Configuring only the data response channels still lets the data generation thread 
+                        // ES: create data for all channels. Does this introduce latency on every loop iteration
+                        // ES: though? Would be ideal to do this outside somehow? It feels instable in the logs
+
+
+
                         // get the channel data vec
                         // The below code block allows us to unlock a syncronous Arc Mutex across an asyncronous await.
                         let mut read_data_vec = {
-                            debug!("Getting GRPC lock {:#?}", now2.elapsed().as_millis());
+                            log::debug!("Getting GRPC lock {:#?}", now2.elapsed().as_millis());
                             let mut z1 = data_lock.lock().unwrap();
-                            debug!("Got GRPC lock {:#?}", now2.elapsed().as_millis());
+                            log::debug!("Got GRPC lock {:#?}", now2.elapsed().as_millis());
                             z1
                         };
+
                         // Iterate over each channel
-                        for i in 0..channel_size {
+                        for i in range.start..range.end {
                             let mut read_info = read_data_vec.get_mut(i).unwrap();
-                            debug!("Elapsed at start of drain {}", now2.elapsed().as_millis());
+                            log::debug!("Elapsed at start of drain {}", now2.elapsed().as_millis());
                             if !read_info.stop_receiving && !read_info.was_unblocked && read_info.read.len() > 0 {
                                 // work out where to start and stop our slice of signal
                                 let mut start = read_info.prev_chunk_start;
@@ -1720,7 +1791,32 @@ impl DataService for DataServiceServicer {
                         channel_data.clear();
                     }
                     container.clear();
-                    thread::sleep(Duration::from_millis(break_chunk_ms));
+
+                    // ES: curiously the obsertved unblock-all increase in latency is around 180 bp 
+                    // when compared to playback runs in MinKNOW. 
+                    
+                    // Maybe this sleep contributes when set at 400 ms? I think this is it...
+
+                    // It may be that the read generation takes approx 400 ms time so
+                    // that this sleep delays by another chunk? I assume this delay
+                    // is not the case when MinKNOW samples from real ADC streams where
+                    // the data does not have to be generated... measure time on this.
+
+                    // Measured time to generate a batch of reads on channels and time to
+                    // take unblock actions and neither comes anywhere near 0.4 seconds.
+
+                    // I think now that this sleep call is conceptually wrong, in that the
+                    // value in MinKNOW (break_reads_after_seconds) partitions the raw
+                    // data streams (hyperstreams in the documentation) but since we
+                    // have here generated these chunks already (equivalent to 
+                    // sampling a continous chunk from a raw data stream) this sleep adds
+                    // an extra duration to the read we observe when we compare to 
+                    // playback runs in MinKNOW. Test with Readfish.
+
+                    // I think it is ok - the mean read lengths are correct, it might
+                    // just have affected delay in the unblock settings?
+
+                    // thread::sleep(Duration::from_millis(break_chunk_ms));
                 }
 
             });

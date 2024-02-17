@@ -4,6 +4,7 @@ random_seed = 10
 target_yield = 100000000
 working_pore_percent = 90 # optional (default 85)
 pore_type = "R9" #Optional, one of R10 or R9, default R9
+pod5 = false
 
 [parameters]
 sample_name = "my_sample_name"

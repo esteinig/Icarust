@@ -4,6 +4,7 @@ random_seed = 10
 target_yield = 100000000
 working_pore_percent = 90 # optional (default 85)
 pore_type = "R10" #Optional, one of R10 or R9, default R9
+pod5 = false
 
 [parameters]
 sample_name = "my_sample_name"
@@ -13,6 +14,7 @@ experiment_duration = 4800 # unused currently
 device_id = "my_device_id"
 position = "my_position"
 break_read_ms = 1000 # optional,, default 400
+
 
 [[sample]]
 name = "Sample1"
