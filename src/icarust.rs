@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use uuid::Uuid;
+use tokio::signal;
 
 use crate::impl_services::acquisition::Acquisition;
 use crate::impl_services::analysis_configuration::Analysis;
@@ -53,7 +54,7 @@ impl Icarust {
         let manager_service_server = self.get_manager_service_server();
 
         // Spawn an Async thread and send it off somewhere
-        tokio::spawn(async move {
+        let manager_handle = tokio::spawn(async move {
             Server::builder()
             .tls_config(tls_manager)
             .unwrap()
@@ -96,9 +97,10 @@ impl Icarust {
 
         let tls_position = self.get_tls_config();
         let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
-        // Send of the main server as well - this allows us to check for the
+
+        // ES: send off the main server as well - this allows us to check for the
         // graceful shutdown Mutex and shutdown the main run routine as well
-        tokio::spawn(async move {
+        let data_handle = tokio::spawn(async move {
             Server::builder()
                 .tls_config(tls_position)
                 .unwrap()
@@ -115,13 +117,21 @@ impl Icarust {
         });
 
 
-        ctrlc::set_handler(move || {
-            {
-                let mut x = graceful_shutdown.lock().unwrap();
-                *x = true;
+        tokio::spawn(async move {
+            // ES: Shutdown signal on manual termination
+            // replaces the previous implementation
+            // due to multiple handler errors when 
+            // running multiple setups
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    log::warn!("Received manual shutdown signal");
+                    {
+                        let mut x = graceful_shutdown.lock().unwrap();
+                        *x = true;
+                    }
+                },
             }
-            std::thread::sleep(Duration::from_millis(2000));
-        }).expect("FAILED TO CATCH SIGNAL SOMEWHOW");
+        });
 
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
@@ -131,7 +141,11 @@ impl Icarust {
             let x = graceful_shutdown_main.lock().unwrap();
             if *x {
                 log::info!("Received graceful shutdown signal in main routine");
-                std::thread::sleep(Duration::from_millis(2000));
+                // ES: abort calls since we may want to reuse the 
+                // same struct `run` method in a loop for benchmarks
+                data_handle.abort();
+                manager_handle.abort();
+                std::thread::sleep(Duration::from_secs(2));
                 break;
             }
         }

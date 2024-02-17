@@ -85,7 +85,7 @@ impl IntoIterator for ChannelInfo {
     type IntoIter = std::array::IntoIter<(String, f64), 4>;
 
     fn into_iter(self) -> Self::IntoIter {
-        std::array::IntoIter::new([
+        IntoIterator::into_iter([
             ("digitisation".to_string(), self.digitisation),
             ("offset".to_string(), self.offset),
             ("range".to_string(), self.range),
