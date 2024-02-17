@@ -1,7 +1,7 @@
 output_path = "/tmp/"
 pore_type = "R9"
 pod5 = false
-vbz_plugin = "static/vbz_plugin"
+vbz_plugin = "vbz_plugin"
 
 [parameters]
 sample_name = "test"

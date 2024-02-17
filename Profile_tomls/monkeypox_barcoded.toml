@@ -2,7 +2,7 @@ output_path = "/tmp/"
 random_seed = 10
 pore_type = "R9"
 pod5 = false
-vbz_plugin = "static/vbz_plugin"
+vbz_plugin = "vbz_plugin"
 
 [parameters]
 sample_name = "test"

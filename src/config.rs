@@ -38,10 +38,9 @@ pub struct Config {
     pub pore_type: Option<String>,
     pub pod5: bool,
     // ES: Added plugin path to configuration file for Frust5 integration
-    
-    // My apologies, it probably didn't have source code published for a reason, 
-    // but needed to modify plugin path for config to use Icarust as a library
     pub vbz_plugin: PathBuf
+    // My apologies Rory, it probably didn't have source code published for a reason, 
+    // but needed to modify the plugin path for config to use Icarust as a library
 }
 
 impl Config {
@@ -51,7 +50,7 @@ impl Config {
             &std::fs::File::create(&file).expect("Faile to create Icarust configuration file"), &self
         ).expect("Failed to write Icarust configuration to file")
     }
-    
+
     pub fn get_working_pore_precent(&self) -> usize {
         self.working_pore_percent.unwrap_or(90)
     }
@@ -164,7 +163,7 @@ pub struct Parameters {
     pub break_read_ms: Option<u64>,
     /// The sample rate in Hz - one of 4000 or 5000. Only used for RNA R9 and DNA R10
     pub sample_rate: Option<u64>,
-    // Added from original fork - configuration for the data service added 
+    // ES: added from original fork - configuration for the data service added 
     // to parameter configuraton file rather than separate .ini file
     pub cert_dir: PathBuf,
     pub manager_port: u32,

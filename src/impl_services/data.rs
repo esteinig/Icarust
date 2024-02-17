@@ -1575,7 +1575,7 @@ impl DataServiceServicer {
                     break;
                 }
 
-                // ES - maximum run time of data generation, graceful shitdown without exiting process so that
+                // ES - maximum run time of data generation, graceful shutdown without exiting process so that
                 // the data generation routine can be used as library import and does not shutdown main runtime
                 if data_run_time > 0 {
                     if now.elapsed().as_secs() >= data_run_time+data_delay {
@@ -1638,7 +1638,7 @@ impl DataService for DataServiceServicer {
         let sampling = self.sampling;
         let chunk_size = break_chunk_ms as f64 / 1000.0 * sampling as f64;
 
-        //ES: AsyncMutex for channel range implementation
+        // ES: AsyncMutex for channel range implementation
         let channel_range = Arc::new(AsyncMutex::new(ChannelRange::new(&channel_size)));
         let channel_range_clone = Arc::clone(&channel_range);
 
