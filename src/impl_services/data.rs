@@ -1534,7 +1534,7 @@ impl DataServiceServicer {
                         value.was_unblocked = false;
                         // Could be a slow problem here?
                         value.write_out = false;
-                        // Our pore died, so sad
+                        // Our pore died, so sad :(
                         if value.dead {
                             dead_pores += 1;
                             continue;
@@ -1638,32 +1638,33 @@ impl DataService for DataServiceServicer {
         let sampling = self.sampling;
         let chunk_size = break_chunk_ms as f64 / 1000.0 * sampling as f64;
 
-        // Async mutex for channel range implementation
+        //ES: AsyncMutex for channel range implementation
         let channel_range = Arc::new(AsyncMutex::new(ChannelRange::new(&channel_size)));
         let channel_range_clone = Arc::clone(&channel_range);
 
-        // ES: Really clever to have the threads inside the stream generator and push data back through a bounded queue to yield into the stream
+        // ES: Really clever to have the threads inside the stream generator and 
+        // push data back through a bounded queue to yield into the stream
 
         // Stream the responses back
         let output = async_stream::try_stream! {
             // Async channel that will await when it ahs one elemnt. This pushes the read response back immediately.
             let (tx_get_live_reads_response, mut rx_get_live_reads_response) = tokio::sync::mpsc::channel(1);
 
-            // spawn an async thread that handles the incoming Get Live Reads Requests.
-            //  This is spawned after we receive our first connection.
+            // Spawn an async thread that handles the incoming GetLiveReadsRequests.
+            // This is spawned after we receive our first connection.
             tokio::spawn(async move {
                 while let Some(live_reads_request) = stream.next().await {
                     let now2 = Instant::now();
                     let live_reads_request = live_reads_request.unwrap();
 
-                    // ES: on initiation request get the channel range indices
+                    // ES: on initiation request get the channel range indices for first and last channel
                     if let Some(get_live_reads_request::Request::Setup(setup_request)) = &live_reads_request.request {
                         let mut range = channel_range.lock().await;
 
-                        range.start = setup_request.first_channel as usize - 1;  // indices for the loop below
+                        range.start = setup_request.first_channel as usize - 1;  // channel range indices for iteratio below
                         range.end = setup_request.last_channel as usize - 1;
 
-                        println!("ChannelRange {:?}", &range);
+                        log::info!("Channel range configured: {:#?}", &range);
                     }
                     // send all the actions we wish to take to action thread
                     // Unw
@@ -1690,15 +1691,8 @@ impl DataService for DataServiceServicer {
 
                     // The below code block allows us to Send the responses across an await.
                     {   
-
-                        let range = channel_range_clone.lock().await;
-
-                        // ES: We can seemingly access the Arc<Mutex<RunSetup>> in this block - interesting!
-                        // ES: Configuring only the data response channels still lets the data generation thread 
-                        // ES: create data for all channels. Does this introduce latency on every loop iteration
-                        // ES: though? Would be ideal to do this outside somehow? It feels instable in the logs
-
-
+                        // ES: access the async mutex for the configured range from initiation request above
+                        let range = channel_range_clone.lock().await; 
 
                         // get the channel data vec
                         // The below code block allows us to unlock a syncronous Arc Mutex across an asyncronous await.
@@ -1797,29 +1791,25 @@ impl DataService for DataServiceServicer {
                     }
                     container.clear();
 
-                    // ES: curiously the obsertved unblock-all increase in latency is around 180 bp 
-                    // when compared to playback runs in MinKNOW. 
-                    
-                    // Maybe this sleep contributes when set at 400 ms? I think this is it...
+                    // ES: curiously we observed an `unblock-all` increase in latency 
+                    // when compared to playback runs in MinKNOW. It is around 180 bp
+                    // for R9.4.1 (460 bps) so maybe this sleep contributes when the
+                    // break chunk paramter is set at 400 ms? I think this is it...
 
-                    // It may be that the read generation takes approx 400 ms time so
-                    // that this sleep delays by another chunk? I assume this delay
-                    // is not the case when MinKNOW samples from real ADC streams where
-                    // the data does not have to be generated... measure time on this.
+                    // I assume this delay is not the case when MinKNOW samples from 
+                    // real ADC streams where the data does not have to be generated.
 
-                    // Measured time to generate a batch of reads on channels and time to
-                    // take unblock actions and neither comes anywhere near 0.4 seconds.
+                    // I think this sleep call is conceptually wrong:
 
-                    // I think now that this sleep call is conceptually wrong, in that the
-                    // value in MinKNOW (break_reads_after_seconds) partitions the raw
-                    // data streams (hyperstreams in the documentation) but since we
-                    // have here generated these chunks already (equivalent to 
-                    // sampling a continous chunk from a raw data stream) this sleep adds
-                    // an extra duration to the read we observe when we compare to 
-                    // playback runs in MinKNOW. Test with Readfish.
+                    // MinKNOW (break_reads_after_seconds) partitions the raw data streams
+                    // (hyperstreams in the remote call documentation) but since we have generated
+                    // these chunks here already (equivalent to sampling a continous chunk from 
+                    // a raw data stream) this sleep adds an extra duration to the read we observe
+                    // when we compare to playback runs in MinKNOW. Test with Readfish.
 
-                    // I think it is ok - the mean read lengths are correct, it might
-                    // just have affected delay in the unblock settings?
+                    // I think it is ok to comment out - the mean read lengths produced without
+                    // this sleep are as expected, but might have affected delay in the unblock
+                    // request?
 
                     // thread::sleep(Duration::from_millis(break_chunk_ms));
                 }
