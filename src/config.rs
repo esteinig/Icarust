@@ -36,7 +36,12 @@ pub struct Config {
     pub working_pore_percent: Option<usize>,
     pub nucleotide_type: Option<String>,
     pub pore_type: Option<String>,
-    pub pod5: bool
+    pub pod5: bool,
+    // ES: Added plugin path to configuration file for Frust5 integration
+    
+    // My apologies, it probably didn't have source code published for a reason, 
+    // but needed to modify plugin path for config to use Icarust as a library
+    pub vbz_plugin: PathBuf
 }
 
 impl Config {

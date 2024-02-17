@@ -5,6 +5,7 @@ target_yield = 100000000
 working_pore_percent = 90 # optional (default 85)
 pore_type = "R9" #Optional, one of R10 or R9, default R9
 pod5 = false
+vbz_plugin = "static/vbz_plugin"
 
 [parameters]
 sample_name = "my_sample_name"
@@ -14,6 +15,11 @@ experiment_duration = 4800 # unused currently
 device_id = "my_device_id"
 position = "my_position"
 break_read_ms = 1000 # optional,, default 400
+
+cert_dir = "static/tls_certs"
+channels = 512
+manager_port = 10000
+position_port = 10001
 
 [[sample]]
 name = "Sample1"

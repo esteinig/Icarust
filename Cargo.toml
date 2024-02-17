@@ -25,7 +25,6 @@ uuid = { version = "1.6.1", features = ["v4"]}
 ndarray-npy = { version = "0.8.1", default-features = false }
 ndarray = "0.15.0"
 memmap2 = "0.5.3"
-rm-frust5-api = "0.0.3"
 chrono = "0.4"
 byteorder = "1"
 clap = { version = "3.2.5", features = ["derive"] }
@@ -41,6 +40,7 @@ podders = "0.1.3"
 # podders = { git = "https://github.com/Adoni5/podders.git" }
 #podders = { path = "../podders" }
 probability = "0.20.3"
+hdf5 = "0.8.0"
 
 
 [build-dependencies]
