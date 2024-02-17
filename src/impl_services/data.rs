@@ -884,7 +884,7 @@ fn process_samples_from_config(
         PoreType::R10 => match config.check_dna_or_rna() {
             // R10 DNA
             NucleotideType::DNA => {
-                let kmer_string = read_to_string("static/dna_r10.4.1_e8.2_400bps/R10_model.tsv")
+                let kmer_string = read_to_string(&config.kmer_model) // "static/dna_r10.4.1_e8.2_400bps/R10_model.tsv"
                     .expect("Failed to read kmers to string");
                 let (_, kmer_hashmap) = simulation::parse_kmers(&kmer_string, KmerType::NineMer)
                     .expect("Failed to parse R10 kmers");
@@ -895,7 +895,7 @@ fn process_samples_from_config(
         PoreType::R9 => match config.check_dna_or_rna() {
             NucleotideType::DNA => None,
             NucleotideType::RNA => {
-                let kmer_string = read_to_string("static/rna_r9.4_180mv_70bps/5mer_levels_v1.txt")
+                let kmer_string = read_to_string(&config.kmer_model) // "static/rna_r9.4_180mv_70bps/5mer_levels_v1.txt"
                     .expect("Failed to read kmers to string");
                 let (_, kmer_hashmap) = simulation::parse_kmers(&kmer_string, KmerType::FiveMer)
                     .expect("Failed to parse R10 kmers");

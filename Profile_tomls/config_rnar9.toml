@@ -5,6 +5,7 @@ pore_type = "R9"
 nucleotide_type = "RNA"
 pod5 = false
 vbz_plugin = "vbz_plugin"
+kmer_model = "static/rna_r9.4_180mv_70bps/5mer_levels_v1.txt"
 
 [parameters]
 sample_name = "wtc11"

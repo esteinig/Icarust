@@ -3,6 +3,7 @@ random_seed = 10
 pore_type = "R9"
 pod5 = false
 vbz_plugin = "vbz_plugin"
+kmer_model = ""
 
 [parameters]
 sample_name = "test"

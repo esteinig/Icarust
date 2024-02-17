@@ -5,6 +5,7 @@ pore_type = "R9"
 nucleotide_type = "DNA"
 pod5 = false
 vbz_plugin = "vbz_plugin"
+kmer_model = ""
 
 [parameters]
 sample_name = "test"
