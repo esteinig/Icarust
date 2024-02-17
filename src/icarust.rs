@@ -67,6 +67,7 @@ impl Icarust {
         // Graceful shutdown
         let graceful_shutdown = Arc::new(Mutex::new(false));
         let graceful_shutdown_clone = Arc::clone(&graceful_shutdown);
+        let graceful_shutdown_main= Arc::clone(&graceful_shutdown);
 
         // Create the position server for our one position.
         let log_svc = LogServiceServer::new(Log {});
@@ -91,33 +92,49 @@ impl Icarust {
             data_runtime
         ));
 
+
+
+        let tls_position = self.get_tls_config();
+        let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
+        // Send of the main server as well - this allows us to check for the
+        // graceful shutdown Mutex and shutdown the main run routine as well
+        tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls_position)
+                .unwrap()
+                .concurrency_limit_per_connection(256)
+                .add_service(log_svc)
+                .add_service(device_svc)
+                .add_service(instance_svc)
+                .add_service(analysis_svc)
+                .add_service(acquisition_svc)
+                .add_service(protocol_svc)
+                .add_service(data_service_server)
+                .serve(addr_position)
+                .await.unwrap();
+        });
+
+
         ctrlc::set_handler(move || {
             {
                 let mut x = graceful_shutdown.lock().unwrap();
                 *x = true;
             }
             std::thread::sleep(Duration::from_millis(2000));
-            std::process::exit(0);
-        })
-            .expect("FAILED TO CATCH SIGNAL SOMEHOW");
+        }).expect("FAILED TO CATCH SIGNAL SOMEWHOW");
 
 
-        let tls_position = self.get_tls_config();
-        let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
 
-        Server::builder()
-            .tls_config(tls_position)
-            .unwrap()
-            .concurrency_limit_per_connection(256)
-            .add_service(log_svc)
-            .add_service(device_svc)
-            .add_service(instance_svc)
-            .add_service(analysis_svc)
-            .add_service(acquisition_svc)
-            .add_service(protocol_svc)
-            .add_service(data_service_server)
-            .serve(addr_position)
-            .await?;
+        loop {
+            interval.tick().await;
+            let x = graceful_shutdown_main.lock().unwrap();
+            if *x {
+                log::info!("Received graceful shutdown signal in main routine");
+                std::thread::sleep(Duration::from_millis(2000));
+                break;
+            }
+        }
 
         Ok(())
     }

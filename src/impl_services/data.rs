@@ -1571,7 +1571,9 @@ impl DataServiceServicer {
                     *graceful_shutdown.lock().unwrap() = true;
                     break;
                 }
-                // ES- maximum run time of data generation
+
+                // ES - maximum run time of data generation, graceful shitdown without exiting process so that
+                // the data generation routine can be used as library import and does not shutdown main runtime
                 if data_run_time > 0 {
                     if now.elapsed().as_secs() >= data_run_time+data_delay {
                         log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
@@ -1579,8 +1581,7 @@ impl DataServiceServicer {
                             let mut x = end_run_time_gracefully.lock().unwrap();
                             *x = true;
                         }
-                        std::thread::sleep(Duration::from_millis(2000));
-                        std::process::exit(0);
+                        break;
                     }
                 }
             }
