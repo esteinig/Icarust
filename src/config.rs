@@ -1,6 +1,6 @@
 
 use std::path::PathBuf;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 
@@ -8,7 +8,7 @@ use crate::reacquisition_distribution::{DeathChance, _calculate_death_chance};
 use crate::read_length_distribution::ReadLengthDist;
 
 /// Holds the type of the pore we are simulating
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub enum PoreType {
     /// R10 model
     R10,
@@ -17,7 +17,7 @@ pub enum PoreType {
 }
 
 /// Type of simulation - RNA or DNA? :hmmmm:
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub enum NucleotideType {
     /// DNA -ACGT baby
     DNA,
@@ -25,7 +25,7 @@ pub enum NucleotideType {
     RNA,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Config {
     pub parameters: Parameters,
     pub sample: Vec<Sample>,
@@ -45,6 +45,13 @@ pub struct Config {
 }
 
 impl Config {
+
+    pub fn to_json(&self, file: &PathBuf) {
+        serde_json::to_writer(
+            &std::fs::File::create(&file).expect("Faile to create Icarust configuration file"), &self
+        ).expect("Failed to write Icarust configuration to file")
+    }
+    
     pub fn get_working_pore_precent(&self) -> usize {
         self.working_pore_percent.unwrap_or(90)
     }
@@ -146,7 +153,7 @@ impl Config {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Parameters {
     pub sample_name: String,
     pub experiment_name: String,
@@ -180,7 +187,7 @@ impl Parameters {
 }
 
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Sample {
     pub name: String,
     pub input_genome: std::path::PathBuf,
