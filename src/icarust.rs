@@ -1,5 +1,3 @@
-
-use chrono::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -40,7 +38,6 @@ impl Icarust {
     pub fn from_toml(file_path: &PathBuf) -> Self {
 
         let config = load_toml(file_path);
-        config.check_fields();
 
         let (run_id, output_path) = Icarust::get_run_params(&config);
         Self { config, run_id, output_path }
@@ -70,7 +67,7 @@ impl Icarust {
         let graceful_shutdown_clone = Arc::clone(&graceful_shutdown);
         let graceful_shutdown_main= Arc::clone(&graceful_shutdown);
 
-        // Create the position server for our one position.
+        // Create the device server and services
         let log_svc = LogServiceServer::new(Log {});
         let instance_svc = InstanceServiceServer::new(Instance {});
         let analysis_svc = AnalysisConfigurationServiceServer::new(Analysis {});
@@ -82,23 +79,20 @@ impl Icarust {
             self.run_id.clone(), self.output_path.clone(),
         ));
 
-
         let data_service_server = DataServiceServer::new(DataServiceServicer::new(
             self.run_id.clone(),
             &self.config,
             self.output_path.clone(),
-            self.config.parameters.channels,
+            self.config.parameters.channels, // total channel count for device
             graceful_shutdown_clone,
             data_delay,
             data_runtime
         ));
 
-
-
         let tls_position = self.get_tls_config();
         let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
 
-        // ES: send off the main server as well - this allows us to check for the
+        // Send off the main server as well - this allows us to check for the
         // graceful shutdown Mutex and shutdown the main run routine as well
         let data_handle = tokio::spawn(async move {
             Server::builder()
@@ -118,7 +112,7 @@ impl Icarust {
 
 
         tokio::spawn(async move {
-            // ES: Shutdown signal on manual termination
+            // Shutdown signal on manual termination
             // replaces the previous implementation
             // due to multiple handler errors when 
             // running multiple setups
@@ -141,8 +135,8 @@ impl Icarust {
             let x = graceful_shutdown_main.lock().unwrap();
             if *x {
                 log::info!("Received graceful shutdown signal in main routine");
-                // ES: abort calls since we may want to reuse the 
-                // same struct `run` method in a loop for benchmarks
+                // Abort calls since we may want to reuse the same struct 
+                // `run` method in a loop for benchmarks
                 data_handle.abort();
                 manager_handle.abort();
                 std::thread::sleep(Duration::from_secs(2));
@@ -182,20 +176,14 @@ impl Icarust {
     fn get_run_params(config: &Config) -> (String, PathBuf) {
 
         let run_id = Uuid::new_v4().to_string().replace('-', "");
-        let sample_id = config.parameters.sample_name.clone();
-        let experiment_id = config.parameters.experiment_name.clone();
-        let output_dir = config.output_path.clone();
-        let start_time_string: String = format!("{}", Utc::now().format("%Y%m%d_%H%M"));
-        let flowcell_id = config.parameters.flowcell_name.clone();
-        let mut output_path = output_dir.clone();
-        output_path.push(experiment_id);
-        output_path.push(sample_id);
-        output_path.push(format!(
-            "{}_XIII_{}_{}",
-            start_time_string,
-            flowcell_id,
-            &run_id[0..9],
-        ));
-        (run_id, output_path)
+
+        // let sample_id = config.parameters.sample_name.clone();
+        // let experiment_id = config.parameters.experiment_name.clone();
+        // let output_dir = config.output_path.clone();
+        // let start_time_string: String = format!("{}", Utc::now().format("%Y%m%d_%H%M"));
+        // let flowcell_id = config.parameters.flowcell_name.clone();        
+        
+        // Simplified to use the output path from the configuration file directly
+        (run_id, config.output_path.to_path_buf())
     }
 }
