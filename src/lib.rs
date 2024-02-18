@@ -3,9 +3,7 @@
 
 pub mod services;
 pub mod impl_services;
-
-pub mod reacquisition_distribution;
-
+pub mod reacquisition;
 pub mod icarust;
 pub mod config;
 pub mod cli;

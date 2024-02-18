@@ -101,7 +101,7 @@ impl SampleDist for ReacquisitionPoisson {
 }
 
 /// Calculate the chance of a pore to die, providing that we need to reach a target yield given a mean read length.
-pub fn _calculate_death_chance(
+pub fn calculate_death_chance(
     starting_channels: f64,
     target_yield: f64,
     mean_read_length: f64,

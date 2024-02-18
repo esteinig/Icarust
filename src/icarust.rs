@@ -1,3 +1,4 @@
+use std::fs::create_dir_all;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,26 +29,42 @@ use crate::services::minknow_api::protocol::protocol_service_server::ProtocolSer
 
 use crate::config::{Config, load_toml};
 
+const SERVER_CERT: &[u8] = include_bytes!("../static/server.crt");
+const SERVER_KEY: &[u8] = include_bytes!("../static/server.key");
+
 // Icarust main runner
 pub struct Icarust {
     pub config: Config,
     pub run_id: String,
-    pub output_path: PathBuf
 }
 impl Icarust {
-    pub fn from_toml(file_path: &PathBuf) -> Self {
+    pub fn from_toml(file_path: &PathBuf, output_path: Option<PathBuf>) -> Self {
 
-        let config = load_toml(file_path);
+        let mut config = load_toml(file_path);
 
-        let (run_id, output_path) = Icarust::get_run_params(&config);
-        Self { config, run_id, output_path }
+        // If the experiment, flowcell and sample name are provided a traditional run 
+        // output directory path is created, otherwise the outdir from the configuration is used
+        let (run_id, output_path_from_config) = Icarust::get_run_params(&config);
+
+        config.outdir = match output_path { 
+            // If an output path is directly provided to the function
+            Some(path) => path, 
+            None => output_path_from_config
+        };
+
+        if !config.outdir.exists() {
+            log::info!("Creating output directory: {}", config.outdir.display());
+            create_dir_all(&config.outdir).unwrap();
+        }
+
+        Self { config, run_id }
     }
     // Delay and runtime in seconds
     pub async fn run(&self, data_delay: u64, data_runtime: u64) -> Result<(), Box<dyn std::error::Error>>  {
 
         // Manager service
         let tls_manager = self.get_tls_config();
-        let addr_manager = format!("[::0]:{}", self.config.parameters.manager_port).parse().unwrap();
+        let addr_manager = format!("[::0]:{}", self.config.server.manager_port).parse().unwrap();
         let manager_service_server = self.get_manager_service_server();
 
         // Spawn an Async thread and send it off somewhere
@@ -76,13 +93,12 @@ impl Icarust {
             run_id: self.run_id.clone(),
         });
         let protocol_svc = ProtocolServiceServer::new(ProtocolServiceServicer::new(
-            self.run_id.clone(), self.output_path.clone(),
+            self.run_id.clone(), self.config.outdir.clone(),
         ));
 
         let data_service_server = DataServiceServer::new(DataServiceServicer::new(
             self.run_id.clone(),
             &self.config,
-            self.output_path.clone(),
             self.config.parameters.channels, // total channel count for device
             graceful_shutdown_clone,
             data_delay,
@@ -90,7 +106,7 @@ impl Icarust {
         ));
 
         let tls_position = self.get_tls_config();
-        let addr_position: SocketAddr = format!("[::0]:{}", self.config.parameters.position_port).parse().unwrap();
+        let addr_position: SocketAddr = format!("[::0]:{}", self.config.server.position_port).parse().unwrap();
 
         // Send off the main server as well - this allows us to check for the
         // graceful shutdown Mutex and shutdown the main run routine as well
@@ -151,6 +167,7 @@ impl Icarust {
         // Create the manager server and add the service to it
         let manager_init = Manager {
             positions: vec![FlowCellPosition {
+                // Icarust uses `device_id` for this - not sure if it should be `position`? 
                 name: self.config.parameters.device_id.clone(),
                 state: 1,
                 rpc_ports: Some(RpcPorts {
@@ -168,22 +185,32 @@ impl Icarust {
         ManagerServiceServer::new(manager_init)
     }
     fn get_tls_config(&self) -> ServerTlsConfig {
-        let cert = std::fs::read(self.config.parameters.cert_dir.join("server.crt")).expect("No TLS cert found");
-        let key = std::fs::read(self.config.parameters.cert_dir.join("server.key")).expect("No TLS key found");
-        let server_identity = Identity::from_pem(cert, key);
+        let server_identity = Identity::from_pem(SERVER_CERT, SERVER_KEY);
         ServerTlsConfig::new().identity(server_identity)
     }
     fn get_run_params(config: &Config) -> (String, PathBuf) {
 
         let run_id = Uuid::new_v4().to_string().replace('-', "");
+        let run_start: String = format!("{}", chrono::Utc::now().format("%Y%m%d_%H%M"));
 
-        // let sample_id = config.parameters.sample_name.clone();
-        // let experiment_id = config.parameters.experiment_name.clone();
-        // let output_dir = config.output_path.clone();
-        // let start_time_string: String = format!("{}", Utc::now().format("%Y%m%d_%H%M"));
-        // let flowcell_id = config.parameters.flowcell_name.clone();        
+        // Traditional path of real run or direct output directory
+        let outdir = match (
+            &config.parameters.experiment_name, 
+            &config.parameters.flowcell_name, 
+            &config.parameters.sample_name
+        ) {
+            (
+                Some(experiment_name), 
+                Some(flowcell_name), 
+                Some(sample_name)
+            ) => {
+                config.outdir.join(experiment_name).join(sample_name).join(
+                    format!("{run_start}_XIII_{flowcell_name}_{}", &run_id[0..9])
+                ).join("fast5_pass")
+            },
+            _ => config.outdir.to_owned()
+        };   
         
-        // Simplified to use the output path from the configuration file directly
-        (run_id, config.output_path.to_path_buf())
+        (run_id, outdir)
     }
 }

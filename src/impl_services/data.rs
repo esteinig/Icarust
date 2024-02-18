@@ -8,9 +8,7 @@ use futures::{Stream, StreamExt};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::create_dir_all;
 use std::mem;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::from_utf8;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -18,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 use std::{thread, u8};
+
+use slow5::{EnumField, FileReader, RecordExt};
 
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::prelude::*;
@@ -27,7 +27,7 @@ use rand::prelude::*;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::reacquisition_distribution::{ReacquisitionPoisson, SampleDist};
+use crate::reacquisition::{ReacquisitionPoisson, SampleDist};
 use crate::services::minknow_api::data::data_service_server::DataService;
 use crate::services::minknow_api::data::get_data_types_response::DataType;
 use crate::services::minknow_api::data::get_live_reads_request::action;
@@ -68,6 +68,40 @@ pub struct DataServiceServicer {
     channel_size: usize,
     sample_rate: u64,
 }
+#[derive(Clone)]
+struct SquigulatorRecord {
+    pub read_group: u32,
+    pub digitisation: f64,
+    pub offset: f64,
+    pub range: f64,
+    pub sampling_rate: f64,
+    pub median_before: f64
+}
+impl SquigulatorRecord {
+    pub fn from_record(record: Record) -> Self {
+        Self {
+            read_group: record.read_group(),
+            digitisation: record.digitisation(),
+            offset: record.offset(),
+            range: record.range(),
+            sampling_rate: record.sampling_rate(),
+            median_before: record.get_aux_field("median_before").unwrap(),
+        }
+    }
+}
+
+impl Default for SquigulatorRecord {
+    fn default() -> Self { 
+        Self {
+            read_group: 0,
+            digitisation: 4069.0,
+            offset: 3.0,
+            range: 12.0,
+            sampling_rate: 5000.0,
+            median_before: 238.0
+        }
+    }
+}
 
 /// Internal to the data generation thread
 #[derive(Clone)]
@@ -92,8 +126,7 @@ struct ReadInfo {
     dead: bool,
     last_read_len: u64,
     pause: f64,
-    // Which sample is this read from - so we can get the chance it kills the pore
-    read_sample_name: String,
+    record: SquigulatorRecord
 }
 
 impl fmt::Debug for ReadInfo {
@@ -102,6 +135,8 @@ impl fmt::Debug for ReadInfo {
             f,
             "{{\n
         Read Id: {}
+        Channel: {}
+        Start mux: {}
         Stop receiving: {}
         Data len: {}
         Read number: {}
@@ -111,11 +146,12 @@ impl fmt::Debug for ReadInfo {
         Time Accessed: {}
         Prev Chunk End: {}
         Dead: {}
-        Read from: {}
         Pause: {}
         WriteOut: {}
         }}",
             self.read_id,
+            self.channel_number,
+            self.start_mux,
             self.stop_receiving,
             self.read.len(),
             self.read_number,
@@ -125,7 +161,6 @@ impl fmt::Debug for ReadInfo {
             self.time_accessed,
             self.prev_chunk_start,
             self.dead,
-            self.read_sample_name,
             self.pause,
             self.write_out
         )
@@ -139,43 +174,63 @@ fn convert_to_u8(raw_data: Vec<i16>) -> Vec<u8> {
     dst
 }
 
-/// Create the output dir to write fast5 too, if it doesn't already exist
-fn create_ouput_dir(output_dir: &std::path::PathBuf) -> std::io::Result<()> {
-    create_dir_all(output_dir)?;
-    Ok(())
+use slow5::{FieldType, FileWriter, Record, RecordCompression, SignalCompression};
+
+pub enum Slow5EndReason {
+    Unknown,
+    MuxChange,
+    UnblockMuxChange,
+    DataServiceUnblockMuxChange,
+    SignalPositive,
+    SignalNegative
+}
+impl Slow5EndReason {
+    // Header and field format for `slow5-rs` builder
+    pub fn header() -> Vec<Vec<u8>> {
+        Vec::from([
+            "unknown".as_bytes().to_vec(),
+            "mux_change".as_bytes().to_vec(),
+            "unblock_mux_change".as_bytes().to_vec(),
+            "data_service_unblock_mux_change".as_bytes().to_vec(),
+            "signal_positive".as_bytes().to_vec(),
+            "signal_negative".as_bytes().to_vec(),
+        ])
+    }
 }
 
-
-use slow5::{FieldType, FileWriter, Record, RecordCompression, SignalCompression};
+impl std::fmt::Display for Slow5EndReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Slow5EndReason::Unknown => "unknown",
+            Slow5EndReason::MuxChange => "mux_change",
+            Slow5EndReason::UnblockMuxChange => "unblock_mux_change",
+            Slow5EndReason::DataServiceUnblockMuxChange => "data_service_unblock_mux_change",
+            Slow5EndReason::SignalPositive => "signal_positive",
+            Slow5EndReason::SignalNegative => "signal_negative"
+        };
+        write!(f, "{s}")
+    }
+}
 
 /// Start the thread that will handle writing out the signal file
 fn start_write_out_thread(
     run_id: String,
     config: &Config,
-    output_path: PathBuf,
     write_out_gracefully: Arc<Mutex<bool>>,
 ) -> SyncSender<ReadInfo> {
     let (complete_read_tx, complete_read_rx) = sync_channel(8000);
+    
     let config = config.clone();
 
     thread::spawn(move || {
         
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
 
-        let exp_start_time = Utc::now();
-        let iso_time = exp_start_time.to_rfc3339_opts(
-            SecondsFormat::Millis, false
-        );
+        // let iso_time = Utc::now().to_rfc3339_opts(
+        //     SecondsFormat::Millis, false
+        // );
 
-        let sample_rate = config.parameters.get_sample_rate() as f64;
-
-
-        let output_dir = PathBuf::from(
-            format!("{}/fast5_pass", output_path.display())
-        );
-        if !output_dir.exists() {
-            create_ouput_dir(&output_dir).unwrap();
-        }
+        let output_dir = config.outdir.clone();
 
         let mut read_numbers_seen = FnvHashSet::with_capacity_and_hasher(
             4000, Default::default()
@@ -201,19 +256,26 @@ fn start_write_out_thread(
                 let output_blow5 = output_dir.join(
                     format!(
                         "{}_pass_{}_{}.blow5",
-                        config.parameters.flowcell_name,
+                        match &config.parameters.flowcell_name { Some(name) => name, None => "FAQ12345" },
                         &run_id[0..6],
                         file_counter,
                     )
                 );
 
+                let end_reason_enum = Slow5EndReason::header();
+                
                 // Drain 4000 reads and write them into Blow5
                 let mut writer = FileWriter::options()
                     .record_compression(RecordCompression::Zlib)
                     .signal_compression(SignalCompression::StreamVByte)
-                    .attr("run_id", "run_0", 0)
+                    .attr("run_id", run_id.clone(), 0)
                     .attr("asic_id", "asic_id_0", 0)
-                    .aux("median", FieldType::Float)
+                    .aux("channel_number", FieldType::Str)
+                    .aux("median_before", FieldType::Double)
+                    .aux("read_number", FieldType::Int32)
+                    .aux("start_mux", FieldType::Uint8)
+                    .aux("start_time", FieldType::Uint64)
+                    .aux("end_reason", FieldType::Enum(end_reason_enum))
                     .create(&output_blow5)
                     .unwrap();
                 
@@ -236,7 +298,7 @@ fn start_write_out_thread(
                         let elapsed_time: chrono::TimeDelta = read_info.time_unblocked.time() - read_info.start_time_utc.time();
                         let stop = convert_milliseconds_to_samples(
                             elapsed_time.num_milliseconds(),
-                            config.parameters.get_sample_rate(),
+                            config.simulation.sample_rate,
                         );
                         new_end = min(stop, read_info.read.len());
                     }
@@ -251,110 +313,27 @@ fn start_write_out_thread(
 
                     let mut rec = Record::builder()
                         .read_id(read_info.read_id)
-                        .read_group(0)
-                        .range(12.0)
-                        .digitisation(4096.)
-                        .offset(3.0)
-                        .sampling_rate(sample_rate)
+                        .read_group(read_info.record.read_group)
+                        .range(read_info.record.range)
+                        .digitisation(read_info.record.digitisation)
+                        .offset(read_info.record.offset)
+                        .sampling_rate(read_info.record.sampling_rate)
                         .raw_signal(&read_info.read)
                         .build()
                         .unwrap();
 
-                    rec.set_aux_field(&mut writer, "median", 1.2f32).unwrap();
-                    writer.add_record(&rec).unwrap();
-                    
-                
-                
+                    rec.set_aux_field(&mut writer, "channel_number", read_info.channel_number).unwrap();
+                    rec.set_aux_field(&mut writer, "median_before", read_info.record.median_before).unwrap();
+                    rec.set_aux_field(&mut writer, "read_number", read_info.read_number as i32).unwrap();
+                    rec.set_aux_field(&mut writer, "start_mux", read_info.start_mux as u8).unwrap();
+                    rec.set_aux_field(&mut writer, "start_time", read_info.start_time).unwrap();
+            
+                    rec.set_aux_field(&mut writer, "end_reason",  match read_info.was_unblocked { 
+                        true =>  EnumField(Slow5EndReason::DataServiceUnblockMuxChange as usize),   
+                        false => EnumField(Slow5EndReason::SignalPositive as usize)
+                    }).unwrap();
 
-                    //     match out_file {
-                    //         OutputFileType::Fast5(ref mut multi) => {
-                    //             let raw_attrs: HashMap<&str, RawAttrsOpts> = HashMap::from([
-                    //                 ("duration", RawAttrsOpts::Duration(signal.len() as u32)),
-                    //                 (
-                    //                     "end_reason",
-                    //                     RawAttrsOpts::EndReason(to_write_info.end_reason),
-                    //                 ),
-                    //                 ("median_before", RawAttrsOpts::MedianBefore(100.0)),
-                    //                 (
-                    //                     "read_id",
-                    //                     RawAttrsOpts::ReadId(to_write_info.read_id.as_str()),
-                    //                 ),
-                    //                 (
-                    //                     "read_number",
-                    //                     RawAttrsOpts::ReadNumber(to_write_info.read_number as i32),
-                    //                 ),
-                    //                 ("start_mux", RawAttrsOpts::StartMux(to_write_info.start_mux)),
-                    //                 (
-                    //                     "start_time",
-                    //                     RawAttrsOpts::StartTime(to_write_info.start_time),
-                    //                 ),
-                    //             ]);
-                    //             let channel_info = ChannelInfo::new(
-                    //                 2048_f64,
-                    //                 0.0,
-                    //                 200.0,
-                    //                 config.parameters.get_sample_rate() as f64,
-                    //                 to_write_info.channel_number.clone(),
-                    //             );
-                    //            if let Err(_) = multi
-                    //                 .create_populated_read(
-                    //                     to_write_info.read_id.clone(),
-                    //                     run_id.clone(),
-                    //                     &tracking_id,
-                    //                     &context_tags,
-                    //                     channel_info,
-                    //                     &raw_attrs,
-                    //                     signal,
-                    //                     config.vbz_plugin.as_os_str()
-                    //                 )
-                    //                 {   
-                    //                     log::debug!("Read creation during Fast5 file write-out failed! Nothing to see here, citizen...");
-                    //                     continue; // handle error when writing the Fast5 file
-                    //                 }; 
-                    //         }
-                    //         OutputFileType::Pod5(ref mut pod5) => {
-                    //             let end_reason = if to_write_info.was_unblocked {
-                    //                 EndReason::DATA_SERVICE_UNBLOCK_MUX_CHANGE
-                    //             } else {
-                    //                 EndReason::SIGNAL_POSITIVE
-                    //             };
-                    //             let pt = match ic_pt {
-                    //                 PoreType::R9 => PodPoreType::R9,
-                    //                 PoreType::R10 => PodPoreType::R10,
-                    //             };
-                    //             let read: PodReadInfo = PodReadInfo {
-                    //                 read_id: Uuid::parse_str(to_write_info.read_id.as_str()).unwrap(),
-                    //                 pore_type: pt,
-                    //                 signal_: signal,
-                    //                 channel: to_write_info.channel as u16,
-                    //                 well: 1,
-                    //                 calibration_offset: -264.0,
-                    //                 calibration_scale: 0.187_069_85,
-                    //                 read_number: to_write_info.read_number,
-                    //                 start: 1,
-                    //                 median_before: 100.0,
-                    //                 tracked_scaling_scale: 1.0,
-                    //                 tracked_scaling_shift: 0.1,
-                    //                 predicted_scaling_scale: 1.5,
-                    //                 predicted_scaling_shift: 0.15,
-                    //                 num_reads_since_mux_change: 10,
-                    //                 time_since_mux_change: 5.0,
-                    //                 num_minknow_events: 1000,
-                    //                 end_reason,
-                    //                 end_reason_forced: false,
-                    //                 run_info: run_id.clone(),
-                    //                 num_samples,
-                    //             };
-                    //             pod5.push_read(read);
-                    //         }
-                    //     }
-                    // }
-                    // if let OutputFileType::Pod5(ref mut pod5) = out_file {
-                    //     pod5.write_reads_to_ipc();
-                    //     // println!("{:#?}", pod5._signal);
-                    //     pod5.write_signal_to_ipc();
-                    //     pod5.write_footer();
-                    // };
+                    writer.add_record(&rec).unwrap();
                 }
                 file_counter += 1;
                 read_numbers_seen.clear();
@@ -556,8 +535,7 @@ fn stop_sending_read(
     usize,
     usize,
 ) {
-    // need a way of picking out channel by channel number or read ID
-
+    // Need a way of picking out channel by channel number or read identifier
     value.stop_receiving = true;
     (
         Some(get_live_reads_response::ActionResponse {
@@ -569,11 +547,9 @@ fn stop_sending_read(
     )
 }
 
-use slow5::{FileReader, RecordExt};
-
 /// Read the pre-computed simulation Blow5 from Cipher
 fn process_simulated_community(config: &Config) -> (FileReader, Vec<String>) {
-    let mut reader = FileReader::open(&config.community).unwrap();
+    let mut reader = FileReader::open(&config.simulation.community).unwrap();
     
     let mut read_index = Vec::new();
     while let Some(Ok(rec)) = reader.records().next() {
@@ -583,7 +559,7 @@ fn process_simulated_community(config: &Config) -> (FileReader, Vec<String>) {
     }
 
     // Reader is consumed in above iteration, so we return another open handle
-    let read_reader: FileReader = FileReader::open(&config.community).unwrap();
+    let read_reader: FileReader = FileReader::open(&config.simulation.community).unwrap();
     (read_reader, read_index)
 }
 
@@ -637,7 +613,7 @@ fn setup_channel_vec(
             dead: !(rng.gen_bool(percent_pore)),
             last_read_len: 0,
             pause: 0.0,
-            read_sample_name: String::from(""),
+            record: SquigulatorRecord::default()
         };
         if !read_info.dead {
             alive += 1
@@ -651,14 +627,21 @@ fn setup_channel_vec(
 /// This is mutated in place for each new read created in the data service loop.
 fn generate_read(
     read_reader: &mut FileReader,
-    read_index: &Vec<String>,
+    read_index: &mut Vec<String>,
     read_info: &mut ReadInfo,
     rng: &mut StdRng,
     read_number: &mut u32,
     experiment_start_time: &u64,
     sample_rate: u64,
-) {
-    // Set stop receieivng to false so we don't accidentally not send the read
+    config: &Config,
+) -> bool {
+
+    if read_index.len() == 0 {
+        log::warn!("Simulated reads have been depleted, exiting run...");
+        return true;
+    }
+
+    // Set stop receiving to false so we don't accidentally not send the read
     read_info.stop_receiving = false;
     // Update as this read hasn't yet been unblocked
     read_info.was_unblocked = false;
@@ -679,20 +662,71 @@ fn generate_read(
     // We replace the entire read generation by a random sample 
     // of a signal read from a pre-computed community simulation
     // which can be any nucleic acid, pore version, read prefix
-    // and is simulated at a particular depth and abundance for
-    // each member
+    // etc and is simulated at a particular depth and abundance 
+    // for each communtiy member (Cipher)
 
-    // TODO: Check if we should give option deplete the community signal...
+    // We can either sample continuously from the community at
+    // random (using `config.simulation.target_yield` for pore
+    // death chance computation) or use sampling with depletion
+    // where we sample each signal read from the community once
+    // and do not sample it again (using the total estimated 
+    // yield of the community simulation file). This will then
+    // terminate Icarust once all signal reads in the community 
+    // have been sampled. 
 
-    // Get a random read from the simulated community
-    let sample_index = rng.gen_range(0..read_index.len());
-    let read_id = read_index[sample_index].as_bytes();
+    // Note that when sampling continously we hae to assign a new
+    // read identifier to each signal read, and the original reads
+    // are therefore not traceable. We may be able to write those 
+    // to another queue and output handler if it becomes necessary.
 
-    // Random access through the Blow5 reader
-    let record = read_reader.get_record(read_id).unwrap();
+    
+    let (record, read_uuid) = match config.simulation.deplete {
+        true => {
 
-    // Iterate the view to get our full read
+            // Get a random read index from the simulated community
+            let sample_index = rng.gen_range(0..read_index.len());
+            // Get the read identifier from the index with depletion
+            let read_id = read_index.remove(sample_index);
+
+            // Get the record and tje original read identifier
+            let record = read_reader.get_record(read_id.clone()).unwrap();
+            let read_uuid = read_id;
+
+            log::debug!(
+                "Sampled index {} with read identifier: {} [with depletion, signal length: {}]",
+                sample_index, read_info.read_id, read_info.read.len()
+            );
+
+
+            (record, read_uuid)
+        },
+        false => {
+            // Get a random read index from the simulated community
+            let sample_index = rng.gen_range(0..read_index.len());
+            // Get the read identifier from the index without depletion
+            let read_id = read_index[sample_index].as_bytes();
+
+            // Get the record for consistency with depletion arm
+            let record = read_reader.get_record(read_id).unwrap();
+
+            // Assign a new read identifier since we can sample the same read multiple times
+            let read_uuid = uuid::Uuid::new_v4().to_string(); 
+
+            log::debug!(
+                "Sampled index {} with read identifier: {} [no depletion, signal length: {}]",
+                sample_index, read_info.read_id, read_info.read.len()
+            );
+
+            (record, read_uuid)
+        }
+    };
+
+
+    // Iterate the raw signal view to get our full read
     read_info.read = record.raw_signal_iter().collect();
+
+    // Set the parsed Slow5 record core fields for writing out
+    read_info.record = SquigulatorRecord::from_record(record);
 
     // Set estimated duration in seconds
     read_info.duration = read_info.read.len() / sample_rate as usize;
@@ -700,16 +734,16 @@ fn generate_read(
     // Set the read length for channel death chance
     read_info.last_read_len = read_info.read.len() as u64;
 
-    // Assign read identifier from sampled read only if sampling from the community with depletion 
-    read_info.read_id = uuid::Uuid::new_v4().to_string(); // TODO: from_utf8(record.read_id()).unwrap().to_string();
-
-    log::debug!("Sampled index {sample_index} with read identifier: {} [signal array length: {}]", read_info.read_id, read_info.read.len());
+    // Assign read identifier
+    read_info.read_id = read_uuid;
 
     // Reset these time based metrics
     read_info.time_accessed = Utc::now();
 
     // Previous chunk start has to be zero as there are now no previous chunks on a new read
     read_info.prev_chunk_start = 0;
+
+    false
 
 }
 
@@ -721,7 +755,6 @@ impl DataServiceServicer {
     pub fn new(
         run_id: String,
         config: &Config,
-        output_path: PathBuf,
         channel_size: usize,
         graceful_shutdown: Arc<Mutex<bool>>,
         data_delay: u64,   // seconds
@@ -731,9 +764,9 @@ impl DataServiceServicer {
         let now = Instant::now();
 
         // Setting up the runtime parameters
-        let working_pore_percent = config.get_working_pore_precent();
-        let break_chunks_ms: u64 = config.parameters.get_chunk_size_ms();
-        let sample_rate: u64 = config.parameters.get_sample_rate();
+        let working_pore_percent = config.parameters.working_pore_percent;
+        let break_chunks_ms: u64 = config.parameters.break_read_ms;
+        let sample_rate: u64 = config.simulation.sample_rate;
         let start_time: u64 = Utc::now().timestamp() as u64;
         
         // Creates a thread safe vector of channels holding `ReadInfo`
@@ -754,7 +787,7 @@ impl DataServiceServicer {
         let is_safe_setup = Arc::clone(&is_setup);
 
         // Looks like this prepares the samples from the configuration...
-        let (mut read_reader, read_index) = process_simulated_community(&config);
+        let (mut read_reader, mut read_index) = process_simulated_community(&config);
         
         // Graceful termination signals handled in main routine
         let write_out_gracefully = Arc::clone(&graceful_shutdown);
@@ -764,12 +797,11 @@ impl DataServiceServicer {
         let complete_read_tx = start_write_out_thread(
             run_id, 
             config, 
-            output_path, 
             write_out_gracefully
         );
 
-        // Pore configurations: starting counts and death chances
-        let mut rng: StdRng = rand::SeedableRng::seed_from_u64(1234567);
+        // Random number generator for pore starting counts, death chance, reacquisition chance, reaquisition pause
+        let mut rng: StdRng = rand::SeedableRng::seed_from_u64(config.get_rand_seed());
 
         // Sets up the mutable thread safe channel vector with initial data
         // Channel with initial configuration is not returned since we are using the thread safe Arc<Mutex>> wrapper so that
@@ -786,12 +818,15 @@ impl DataServiceServicer {
         let death_chance = config.calculate_death_chance(starting_functional_pore_count);
         log::info!("Death chances {:#?}", death_chance);
 
-        // See where this belongs...
+        // Logging
         let mut time_logged_at: f64 = 0.0;
 
         if data_run_time > 0 {
             log::warn!("Maximum run time for data generation set to {} seconds", data_run_time)
         }
+
+        // Move into thread data generation loop
+        let config_clone = config.clone();
 
         // Start the thread to generate data
         thread::spawn(move || {
@@ -952,20 +987,27 @@ impl DataServiceServicer {
                             // time which is later used in the signal request to compute the
                             // signal chunk size...
 
-                            generate_read(
+                            let depleted = generate_read(
                                 &mut read_reader,
-                                &read_index,
+                                &mut read_index,
                                 read_info,
                                 &mut rng,
                                 &mut read_number,
                                 &start_time,
-                                sample_rate
-                            )
+                                sample_rate,
+                                &config_clone
+                            );
+
+                            if depleted {
+                                // Reads have been depleted if not sampling continuously
+                                *graceful_shutdown.lock().unwrap() = true;
+                                break;
+                            }
                         }
                     }
                 }
-                
-                // Logging every second
+
+                // Logging every second or so
                 let _end = now.elapsed().as_secs_f64();
                 if _end.ceil() > time_logged_at {
                     log::info!(
@@ -975,8 +1017,8 @@ impl DataServiceServicer {
                     time_logged_at = _end.ceil();
                 }
 
-                // Graceful shutdown check at this iteration
                 {
+                    // Graceful shutdown check at this iteration
                     if *graceful_shutdown.lock().unwrap() {
                         break;
                     }
