@@ -2,41 +2,48 @@
 #![deny(missing_doc_code_examples)]
 #![allow(clippy::too_many_arguments)]
 
-use futures::lock::Mutex as AsyncMutex;
-
-use futures::{Stream, StreamExt};
-use std::cmp::min;
-use std::collections::HashMap;
-use std::fmt;
-use std::mem;
-use std::pin::Pin;
-use std::str::from_utf8;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use futures::lock::Mutex as AsyncMutex;
+use futures::{Stream, StreamExt};
+
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::str::from_utf8;
 use std::time::Duration;
 use std::time::Instant;
 use std::{thread, u8};
+use std::pin::Pin;
+use std::cmp::min;
+use std::fmt;
+use std::mem;
+
 
 use slow5::{EnumField, FileReader, RecordExt};
-
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::prelude::*;
-use fnv::FnvHashSet;
-
-use rand::prelude::*;
 use tonic::{Request, Response, Status};
+use chrono::prelude::*;
+use rand::prelude::*;
+use fnv::FnvHashSet;
 use uuid::Uuid;
 
-use crate::reacquisition::{ReacquisitionPoisson, SampleDist};
 use crate::services::minknow_api::data::data_service_server::DataService;
 use crate::services::minknow_api::data::get_data_types_response::DataType;
 use crate::services::minknow_api::data::get_live_reads_request::action;
 use crate::services::minknow_api::data::get_live_reads_response::ReadData;
 use crate::services::minknow_api::data::{
-    get_live_reads_request, get_live_reads_response, GetDataTypesRequest, GetDataTypesResponse,
-    GetLiveReadsRequest, GetLiveReadsResponse,
+    get_live_reads_request, 
+    get_live_reads_response, 
+    GetDataTypesRequest, 
+    GetDataTypesResponse,
+    GetLiveReadsRequest, 
+    GetLiveReadsResponse,
 };
+
 use crate::config::Config;
+use crate::reacquisition::{
+    ReacquisitionPoisson, 
+    SampleDist
+};
 
 /// unused
 #[derive(Debug)]
@@ -225,17 +232,17 @@ fn start_write_out_thread(
     thread::spawn(move || {
         
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
-
-        // let iso_time = Utc::now().to_rfc3339_opts(
-        //     SecondsFormat::Millis, false
-        // );
-
         let output_dir = config.outdir.clone();
 
         let mut read_numbers_seen = FnvHashSet::with_capacity_and_hasher(
             4000, Default::default()
         );
         let mut file_counter = 0;
+
+        let device_id = config.parameters.device_id.clone();
+        let flowcell_name = config.parameters.flowcell_name.unwrap_or(String::from("FAQ12345"));
+        let sample_id = config.parameters.sample_name.unwrap_or(String::from("SYNTHETIC"));
+        let exp_start_time = chrono::Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
         loop {
 
@@ -256,7 +263,7 @@ fn start_write_out_thread(
                 let output_blow5 = output_dir.join(
                     format!(
                         "{}_pass_{}_{}.blow5",
-                        match &config.parameters.flowcell_name { Some(name) => name, None => "FAQ12345" },
+                        flowcell_name,
                         &run_id[0..6],
                         file_counter,
                     )
@@ -268,8 +275,11 @@ fn start_write_out_thread(
                 let mut writer = FileWriter::options()
                     .record_compression(RecordCompression::Zlib)
                     .signal_compression(SignalCompression::StreamVByte)
+                    .attr("device_id", device_id.clone(), 0)
+                    .attr("flow_cell_id", flowcell_name.clone(), 0)
                     .attr("run_id", run_id.clone(), 0)
-                    .attr("asic_id", "asic_id_0", 0)
+                    .attr("sample_id", sample_id.clone(), 0)
+                    .attr("exp_start_time", exp_start_time.clone(), 0)
                     .aux("channel_number", FieldType::Str)
                     .aux("median_before", FieldType::Double)
                     .aux("read_number", FieldType::Int32)
@@ -554,11 +564,11 @@ fn process_simulated_community(config: &Config) -> (FileReader, Vec<String>) {
     let mut read_index = Vec::new();
     while let Some(Ok(rec)) = reader.records().next() {
         read_index.push(
-            from_utf8(rec.read_id()).unwrap().to_string()
+            from_utf8(rec.read_id()).unwrap().to_string() // TODO: maybe this should be Vec<u8>
         );
     }
 
-    // Reader is consumed in above iteration, so we return another open handle
+    // Reader is consumed in above iteration and closes on drop, so we return another open handle
     let read_reader: FileReader = FileReader::open(&config.simulation.community).unwrap();
     (read_reader, read_index)
 }

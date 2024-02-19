@@ -3,6 +3,11 @@ use icarust::cli::Cli;
 use icarust::icarust::Icarust;
 
 /// Main routine
+/// 
+/// TODO:
+/// 
+/// 1. Death rate settings and yield parsing from Blow5
+/// 2.Sample rate parsing from Blow5
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 

@@ -1,11 +1,14 @@
 use std::fs::create_dir_all;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process;
+use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use uuid::Uuid;
 use tokio::signal;
+use slow5::{FileReader, HeaderExt, RecordExt};
 
 use crate::impl_services::acquisition::Acquisition;
 use crate::impl_services::analysis_configuration::Analysis;
@@ -56,6 +59,22 @@ impl Icarust {
             log::info!("Creating output directory: {}", config.outdir.display());
             create_dir_all(&config.outdir).unwrap();
         }
+
+        if config.simulation.target_yield.is_none() && !config.simulation.deplete {
+            log::error!(
+                "When continously sampling from community (deplete = false) target yield must be set in configuration file");
+            process::exit(1);
+        }
+
+        (   
+            config.simulation.sample_rate, 
+            config.simulation.mean_read_length, 
+            config.simulation.target_yield  
+        ) = Icarust::parse_simulation_header(
+            &config.simulation.community, 
+            &config.simulation.target_yield
+        );
+
 
         Self { config, run_id }
     }
@@ -187,6 +206,34 @@ impl Icarust {
     fn get_tls_config(&self) -> ServerTlsConfig {
         let server_identity = Identity::from_pem(SERVER_CERT, SERVER_KEY);
         ServerTlsConfig::new().identity(server_identity)
+    }
+    fn parse_simulation_header(community: &PathBuf, config_target_yield: &Option<f64>) -> (u64, f64, Option<f64>) {
+
+        let reader = FileReader::open(&community).unwrap();
+
+        // Community files created with Cipher have the required information in the header
+        let header = reader.header();
+
+        let sampling_rate = from_utf8(
+            header.get_attribute("sampling_rate", 0).unwrap()
+        ).unwrap().parse::<u64>().unwrap();
+        
+
+        let mean_read_length = from_utf8(
+            header.get_attribute("mean_read_length", 0).unwrap()
+        ).unwrap().parse::<f64>().unwrap();
+
+        let target_yield = match config_target_yield {
+            Some(target_yield) => Some(target_yield.to_owned()),
+            None => {
+                 Some(from_utf8(
+                    header.get_attribute("target_yield", 0).unwrap()
+                ).unwrap().parse::<f64>().unwrap())
+            }
+        };
+
+        (sampling_rate, mean_read_length, target_yield)
+
     }
     fn get_run_params(config: &Config) -> (String, PathBuf) {
 

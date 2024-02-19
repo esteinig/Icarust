@@ -1,5 +1,5 @@
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -39,9 +39,12 @@ pub struct ParameterConfig {
 pub struct SimulationConfig {
     pub community: PathBuf,
     pub deplete: bool,
-    pub sample_rate: u64,
-    pub target_yield: f64,
+    pub target_yield: Option<f64>,
+
+    #[serde(skip_deserializing)]
     pub mean_read_length: f64,
+    #[serde(skip_deserializing)]
+    pub sample_rate: u64,
 }
 
 impl Config {
@@ -59,7 +62,13 @@ impl Config {
         let death = DeathChance {
             base_chance: calculate_death_chance(
                 starting_channels as f64,
-                self.simulation.target_yield.to_owned(),
+                match self.simulation.target_yield {
+                    Some(target_yield) => target_yield,
+                    None => {
+                        log::error!("Target yield for simulation must be specified"); // usually set in config parser
+                        process::exit(1)
+                    }
+                },
                 self.simulation.mean_read_length,
             ),
             mean_read_length: self.simulation.mean_read_length,
