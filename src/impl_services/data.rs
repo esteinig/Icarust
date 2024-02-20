@@ -308,7 +308,7 @@ fn start_write_out_thread(
                         let elapsed_time: chrono::TimeDelta = read_info.time_unblocked.time() - read_info.start_time_utc.time();
                         let stop = convert_milliseconds_to_samples(
                             elapsed_time.num_milliseconds(),
-                            config.simulation.sample_rate,
+                            config.simulation.sampling_rate,
                         );
                         new_end = min(stop, read_info.read.len());
                     }
@@ -534,7 +534,7 @@ fn unblock_reads(
     )
 }
 
-/// Stop sending read data, sets Stop receiving to True.
+/// Stop sending read data, sets `stop_receiving` to True.
 fn stop_sending_read(
     _action: get_live_reads_request::StopFurtherData,
     action_id: String,
@@ -776,7 +776,7 @@ impl DataServiceServicer {
         // Setting up the runtime parameters
         let working_pore_percent = config.parameters.working_pore_percent;
         let break_chunks_ms: u64 = config.parameters.break_read_ms;
-        let sample_rate: u64 = config.simulation.sample_rate;
+        let sample_rate: u64 = config.simulation.sampling_rate;
         let start_time: u64 = Utc::now().timestamp() as u64;
         
         // Creates a thread safe vector of channels holding `ReadInfo`
@@ -826,7 +826,8 @@ impl DataServiceServicer {
 
         // Use initial functional pore count to calculate death chances
         let death_chance = config.calculate_death_chance(starting_functional_pore_count);
-        log::info!("Death chances {:#?}", death_chance);
+        log::info!("Pore death chances: {:#?}", death_chance);
+
 
         // Logging
         let mut time_logged_at: f64 = 0.0;
@@ -869,7 +870,7 @@ impl DataServiceServicer {
 
                 // Sleep the length of the milliseconds chunk size
                 // Don't sleep the thread just reacquire reads
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(config_clone.parameters.break_read_ms));
 
                 let _channels_with_reads = 0;
 
@@ -950,7 +951,7 @@ impl DataServiceServicer {
                             let yolo = death_chance.get("0").unwrap();
 
                             // All our death chances are altered by yield, so we need to change the 
-                            // chance of death  if a read was unblocked due to resulting lowered yield
+                            // chance of death if a read was unblocked due to resulting lowered yield
                             let prev_chance_multiplier = match read_info.was_unblocked {
                                 true => {
                                     // We unblocked the read and now we need to alter the chance of death
@@ -966,7 +967,7 @@ impl DataServiceServicer {
 
                             // Compute whether the channel is now dead
                             read_info.dead = rng.gen_bool(
-                                yolo.base_chance * prev_chance_multiplier,
+                                yolo.base_chance * prev_chance_multiplier * yolo.multiplier
                             );
                         }
 

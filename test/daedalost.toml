@@ -13,6 +13,15 @@ channels = 512
 break_read_ms = 400
 working_pore_percent = 85
 
+# OPTIONAL
+
+# Use this value to multiply chance of
+# pore death (no unblock and unblock 
+# adjusted due to target yield 
+# integration)
+
+# pore_death_multiplier = 1.0
+
 # Use these to setup a tradtional run output
 # directory where signal data is deposited
 # in the `fast5_pass` subdirectory
@@ -22,9 +31,12 @@ working_pore_percent = 85
 # flowcell_name = "FAQ12345"
 
 [simulation]
-community = "/tmp/test.blow5"
+community = "/data/dev/meta-gp/cipher/testing/sim/simple_community.blow5"
 deplete = true
-sample_rate = 5000
-mean_read_length = 5000
+
+# Target yield must be specified if continuously sampling (deplete = false)
+# If specified with depletion sampling (deplete = true) the community linked 
+# value is overwritten. Target yield affects the chance of pore death.
+
 target_yield = 100000000000
 

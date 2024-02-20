@@ -6,9 +6,8 @@ use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
-use uuid::Uuid;
 use tokio::signal;
-use slow5::{FileReader, HeaderExt, RecordExt};
+use slow5::FileReader;
 
 use crate::impl_services::acquisition::Acquisition;
 use crate::impl_services::analysis_configuration::Analysis;
@@ -38,16 +37,31 @@ const SERVER_KEY: &[u8] = include_bytes!("../static/server.key");
 // Icarust main runner
 pub struct Icarust {
     pub config: Config,
-    pub run_id: String,
 }
 impl Icarust {
     pub fn from_toml(file_path: &PathBuf, output_path: Option<PathBuf>) -> Self {
 
+        log::debug!("Reading configuration file: {}", file_path.display());
         let mut config = load_toml(file_path);
+
+        if config.simulation.target_yield.is_none() && !config.simulation.deplete {
+            log::error!("When continously sampling from community (deplete = false) target yield must be set in configuration file!");
+            process::exit(1);
+        }
+
+        (   
+            config.simulation.sampling_rate, 
+            config.simulation.mean_read_length, 
+            config.simulation.target_yield,
+            config.simulation.run_id
+        ) = Icarust::parse_simulation_header(
+            &config.simulation.community, 
+            &config.simulation.target_yield
+        );
 
         // If the experiment, flowcell and sample name are provided a traditional run 
         // output directory path is created, otherwise the outdir from the configuration is used
-        let (run_id, output_path_from_config) = Icarust::get_run_params(&config);
+        let output_path_from_config = Icarust::get_run_params(&config);
 
         config.outdir = match output_path { 
             // If an output path is directly provided to the function
@@ -60,23 +74,10 @@ impl Icarust {
             create_dir_all(&config.outdir).unwrap();
         }
 
-        if config.simulation.target_yield.is_none() && !config.simulation.deplete {
-            log::error!(
-                "When continously sampling from community (deplete = false) target yield must be set in configuration file");
-            process::exit(1);
-        }
+        log::info!("{:#?}", config);
 
-        (   
-            config.simulation.sample_rate, 
-            config.simulation.mean_read_length, 
-            config.simulation.target_yield  
-        ) = Icarust::parse_simulation_header(
-            &config.simulation.community, 
-            &config.simulation.target_yield
-        );
+        Self { config }
 
-
-        Self { config, run_id }
     }
     // Delay and runtime in seconds
     pub async fn run(&self, data_delay: u64, data_runtime: u64) -> Result<(), Box<dyn std::error::Error>>  {
@@ -107,16 +108,19 @@ impl Icarust {
         let log_svc = LogServiceServer::new(Log {});
         let instance_svc = InstanceServiceServer::new(Instance {});
         let analysis_svc = AnalysisConfigurationServiceServer::new(Analysis {});
-        let device_svc = DeviceServiceServer::new(Device::new(self.config.parameters.channels));
-        let acquisition_svc = AcquisitionServiceServer::new(Acquisition {
-            run_id: self.run_id.clone(),
+        
+        let device_svc = DeviceServiceServer::new(Device::new(
+            self.config.parameters.channels
+        ));
+        let acquisition_svc = AcquisitionServiceServer::new(Acquisition { 
+            run_id: self.config.simulation.run_id.clone() 
         });
         let protocol_svc = ProtocolServiceServer::new(ProtocolServiceServicer::new(
-            self.run_id.clone(), self.config.outdir.clone(),
+            self.config.simulation.run_id.clone(), 
+            self.config.outdir.clone(),
         ));
-
         let data_service_server = DataServiceServer::new(DataServiceServicer::new(
-            self.run_id.clone(),
+            self.config.simulation.run_id.clone(),
             &self.config,
             self.config.parameters.channels, // total channel count for device
             graceful_shutdown_clone,
@@ -207,12 +211,16 @@ impl Icarust {
         let server_identity = Identity::from_pem(SERVER_CERT, SERVER_KEY);
         ServerTlsConfig::new().identity(server_identity)
     }
-    fn parse_simulation_header(community: &PathBuf, config_target_yield: &Option<f64>) -> (u64, f64, Option<f64>) {
+    fn parse_simulation_header(community: &PathBuf, config_target_yield: &Option<f64>) -> (u64, f64, Option<f64>, String) {
 
         let reader = FileReader::open(&community).unwrap();
 
         // Community files created with Cipher have the required information in the header
         let header = reader.header();
+
+        let run_id = from_utf8(
+            header.get_attribute("run_id", 0).unwrap()
+        ).unwrap().parse::<String>().unwrap();
 
         let sampling_rate = from_utf8(
             header.get_attribute("sampling_rate", 0).unwrap()
@@ -224,6 +232,10 @@ impl Icarust {
         ).unwrap().parse::<f64>().unwrap();
 
         let target_yield = match config_target_yield {
+            // If a target yield was specifically set in the configuration
+            // use this value instead of the community header value -
+            // this should always be done with continuous sampling 
+            // without depletion!
             Some(target_yield) => Some(target_yield.to_owned()),
             None => {
                  Some(from_utf8(
@@ -231,13 +243,13 @@ impl Icarust {
                 ).unwrap().parse::<f64>().unwrap())
             }
         };
+        
 
-        (sampling_rate, mean_read_length, target_yield)
+        (sampling_rate, mean_read_length, target_yield, run_id)
 
     }
-    fn get_run_params(config: &Config) -> (String, PathBuf) {
+    fn get_run_params(config: &Config) -> PathBuf {
 
-        let run_id = Uuid::new_v4().to_string().replace('-', "");
         let run_start: String = format!("{}", chrono::Utc::now().format("%Y%m%d_%H%M"));
 
         // Traditional path of real run or direct output directory
@@ -252,12 +264,12 @@ impl Icarust {
                 Some(sample_name)
             ) => {
                 config.outdir.join(experiment_name).join(sample_name).join(
-                    format!("{run_start}_XIII_{flowcell_name}_{}", &run_id[0..9])
+                    format!("{run_start}_XIII_{flowcell_name}_{}", &config.simulation.run_id[0..9])
                 ).join("fast5_pass")
             },
             _ => config.outdir.to_owned()
         };   
         
-        (run_id, outdir)
+        outdir
     }
 }

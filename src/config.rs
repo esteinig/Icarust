@@ -1,10 +1,11 @@
 
-use std::{path::PathBuf, process};
 use serde::{Deserialize, Serialize};
+use std::{path::PathBuf, process};
 use std::collections::HashMap;
 use std::fs;
 
 use crate::reacquisition::{DeathChance, calculate_death_chance};
+
 
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Config {
@@ -22,12 +23,12 @@ pub struct ServerConfig {
     pub position_port: u32,
 }
 
-
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct ParameterConfig {
     pub channels: usize,
     pub break_read_ms: u64,
     pub working_pore_percent: usize,
+    pub pore_death_multiplier: Option<f64>,
     pub device_id: String,
     pub position: String,
     pub sample_name: Option<String>,
@@ -40,11 +41,13 @@ pub struct SimulationConfig {
     pub community: PathBuf,
     pub deplete: bool,
     pub target_yield: Option<f64>,
-
+    
+    #[serde(skip_deserializing)]
+    pub run_id: String,
     #[serde(skip_deserializing)]
     pub mean_read_length: f64,
     #[serde(skip_deserializing)]
-    pub sample_rate: u64,
+    pub sampling_rate: u64,
 }
 
 impl Config {
@@ -55,7 +58,7 @@ impl Config {
         ).expect("Failed to write Icarust configuration to file")
     }
 
-    /// Calculate the chance a pore will die
+    /// Calculate the base chance a pore will die
     pub fn calculate_death_chance(&self, starting_channels: usize) -> HashMap<String, DeathChance> {
 
         let mut deaths = HashMap::new();
@@ -70,8 +73,10 @@ impl Config {
                     }
                 },
                 self.simulation.mean_read_length,
+                match self.parameters.pore_death_multiplier { Some(multiplier) => multiplier, None => 1.0 }
             ),
             mean_read_length: self.simulation.mean_read_length,
+            multiplier: match self.parameters.pore_death_multiplier { Some(multiplier) => multiplier, None => 1.0 }
         };
         deaths.insert("0".to_string(), death);
 

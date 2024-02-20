@@ -105,12 +105,14 @@ pub fn calculate_death_chance(
     starting_channels: f64,
     target_yield: f64,
     mean_read_length: f64,
+    multiplier: f64
 ) -> f64 {
-    1.0_f64 / (target_yield / mean_read_length / starting_channels)
+    (1.0_f64 / (target_yield / mean_read_length / starting_channels))*multiplier
 }
 
 #[derive(Debug)]
 pub struct DeathChance {
     pub base_chance: f64,
     pub mean_read_length: f64,
+    pub multiplier: f64 // multiplies yield in pore death calculation to increase rate of degradation
 }
