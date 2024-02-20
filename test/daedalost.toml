@@ -30,6 +30,9 @@ working_pore_percent = 85
 # experiment_name = "test_virus"
 # flowcell_name = "FAQ12345"
 
+# data_generator_sleep_ms = 10    #  default 10
+# data_service_sleep_ms = 0     #  default `break_read_ms`
+
 [simulation]
 community = "/data/dev/meta-gp/cipher/testing/sim/simple_community.blow5"
 deplete = true

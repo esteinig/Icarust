@@ -839,6 +839,16 @@ impl DataServiceServicer {
         // Move into thread data generation loop
         let config_clone = config.clone();
 
+        // For testing impact on unblock-all outcomes
+        let data_generator_sleep_ms = match config.parameters.data_generator_sleep_ms {
+            Some(v) => v, None => 10
+        };
+
+         // For testing impact on unblock-all outcomes
+         let data_service_sleep_ms = match config.parameters.data_service_sleep_ms {
+            Some(v) => v, None => break_chunks_ms
+        };
+
         // Start the thread to generate data
         thread::spawn(move || {
 
@@ -866,11 +876,14 @@ impl DataServiceServicer {
                 let mut awaiting_reacquisition = 0;
                 let mut occupied = 0;
 
-                // Not sure what's going on here?
-
+                // Not sure what's going on here? Original comments:
                 // Sleep the length of the milliseconds chunk size
                 // Don't sleep the thread just reacquire reads
-                thread::sleep(Duration::from_millis(config_clone.parameters.break_read_ms));
+
+                if data_generator_sleep_ms > 0 {
+                    thread::sleep(Duration::from_millis(data_generator_sleep_ms));
+                }
+                
 
                 let _channels_with_reads = 0;
 
@@ -1061,7 +1074,7 @@ impl DataServiceServicer {
             read_data: channel_vec_safe, // Arc<Mutex> that links to the clone used in data generation loop
             action_responses: action_response_safe,
             setup: is_safe_setup,
-            break_chunks_ms,
+            break_chunks_ms: data_service_sleep_ms,
             channel_size,
             sample_rate,
         }
@@ -1311,8 +1324,11 @@ impl DataService for DataServiceServicer {
                     // I think it is ok to comment out - the mean read lengths produced without
                     // this sleep are as expected, but might have affected delay in the unblock
                     // request?
-
-                    // thread::sleep(Duration::from_millis(break_chunk_ms));
+                    
+                    if break_chunk_ms > 0 {
+                        thread::sleep(Duration::from_millis(break_chunk_ms));
+                    }
+                    
                 }
 
             });

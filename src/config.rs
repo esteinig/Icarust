@@ -27,6 +27,8 @@ pub struct ServerConfig {
 pub struct ParameterConfig {
     pub channels: usize,
     pub break_read_ms: u64,
+    pub data_generator_sleep_ms: Option<u64>,
+    pub data_service_sleep_ms: Option<u64>,
     pub working_pore_percent: usize,
     pub pore_death_multiplier: Option<f64>,
     pub device_id: String,
