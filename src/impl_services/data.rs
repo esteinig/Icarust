@@ -295,8 +295,9 @@ fn start_write_out_thread(
                 for read_info in read_infos.drain(..range_end) {
 
                     // Skip this read if we are trying to write it out twice
+                    // this tends to happen very rarely e.g. on disconnection
                     if !read_numbers_seen.insert(read_info.read_id.clone()) {
-                        log::warn!("Read seen twice?");
+                        log::warn!("Read has been seen twice: {}", &read_info.read_id);
                         continue;
                     }
 
@@ -313,9 +314,9 @@ fn start_write_out_thread(
                         new_end = min(stop, read_info.read.len());
                     }
 
-                    let signal = read_info.read[0..new_end].to_vec();
-                    log::debug!("{read_info:#?}");
 
+                    let signal = read_info.read[0..new_end].to_vec();
+                    
                     if signal.is_empty() {
                         log::error!("Attempted to write empty signal");
                         continue;
@@ -328,7 +329,7 @@ fn start_write_out_thread(
                         .digitisation(read_info.record.digitisation)
                         .offset(read_info.record.offset)
                         .sampling_rate(read_info.record.sampling_rate)
-                        .raw_signal(&read_info.read)
+                        .raw_signal(&signal)
                         .build()
                         .unwrap();
 
