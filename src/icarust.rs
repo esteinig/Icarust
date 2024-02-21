@@ -171,14 +171,13 @@ impl Icarust {
 
         loop {
             interval.tick().await;
-            let x = graceful_shutdown_main.lock().unwrap();
-            if *x {
+            if *graceful_shutdown_main.lock().unwrap() {
                 log::info!("Received graceful shutdown signal in main routine");
                 // Abort calls since we may want to reuse the same struct 
                 // `run` method in a loop for benchmarks
                 data_handle.abort();
                 manager_handle.abort();
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_secs(10));
                 break;
             }
         }

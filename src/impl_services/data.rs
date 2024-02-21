@@ -257,6 +257,7 @@ fn start_write_out_thread(
                 *write_out_gracefully.lock().unwrap() 
             };
 
+
             if read_infos.len() >= 4000 || terminate_thread {
 
                 // Output file path for Blow5
@@ -648,9 +649,16 @@ fn generate_read(
 ) -> bool {
 
     if read_index.len() == 0 {
-        log::warn!("Simulated reads have been depleted, exiting run...");
+        log::warn!("Simulated reads have been depleted");
         return true;
     }
+
+    let now = Utc::now();
+
+    // Read start time in samples (seconds since start of experiment * sample rate)
+    read_info.start_time = (now.timestamp() as u64 - experiment_start_time) * sample_rate;
+    read_info.start_time_seconds = (now.timestamp() as u64 - experiment_start_time) as usize;
+    read_info.start_time_utc = now;
 
     // Set stop receiving to false so we don't accidentally not send the read
     read_info.stop_receiving = false;
@@ -660,13 +668,6 @@ fn generate_read(
     read_info.end_reason = 1;
     // We want to write this out at the end (when it has completed or is unblocked)
     read_info.write_out = true;
-
-    let now = Utc::now();
-
-    // Read start time in samples (seconds since start of experiment * sample rate)
-    read_info.start_time = (now.timestamp() as u64 - experiment_start_time) * sample_rate;
-    read_info.start_time_seconds = (now.timestamp() as u64 - experiment_start_time) as usize;
-    read_info.start_time_utc = now;
 
     read_info.read_number = *read_number;
 
@@ -698,9 +699,9 @@ fn generate_read(
             let sample_index = rng.gen_range(0..read_index.len());
             // Get the read identifier from the index with depletion
             let read_id = read_index.remove(sample_index);
-
             // Get the record and tje original read identifier
             let record = read_reader.get_record(read_id.clone()).unwrap();
+
             let read_uuid = read_id;
 
             log::debug!(
@@ -716,10 +717,8 @@ fn generate_read(
             let sample_index = rng.gen_range(0..read_index.len());
             // Get the read identifier from the index without depletion
             let read_id = read_index[sample_index].as_bytes();
-
             // Get the record for consistency with depletion arm
             let record = read_reader.get_record(read_id).unwrap();
-
             // Assign a new read identifier since we can sample the same read multiple times
             let read_uuid = uuid::Uuid::new_v4().to_string(); 
 
@@ -749,7 +748,7 @@ fn generate_read(
     read_info.read_id = read_uuid;
 
     // Reset these time based metrics
-    read_info.time_accessed = Utc::now();
+    read_info.time_accessed = now;
 
     // Previous chunk start has to be zero as there are now no previous chunks on a new read
     read_info.prev_chunk_start = 0;
@@ -1024,7 +1023,17 @@ impl DataServiceServicer {
                             );
 
                             if depleted {
-                                // Reads have been depleted if not sampling continuously
+                                // On completions, reads may still be occupying pores, so we
+                                // need to send all of these into the write out channel
+                                let mut j = 0;
+                                for i in 0..channel_size {
+                                    let read_info = channels.get(i).unwrap();
+                                    if read_info.write_out {
+                                        complete_read_tx.send(read_info.clone()).unwrap();
+                                        j +=1 
+                                    }
+                                }
+                                log::info!("Writing out reads still occupying pores: {j}");
                                 *graceful_shutdown.lock().unwrap() = true;
                                 break;
                             }
@@ -1060,9 +1069,19 @@ impl DataServiceServicer {
                 if data_run_time > 0 {
                     if now.elapsed().as_secs() >= data_run_time+data_delay {
                         log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
-                        {
-                            let mut x = end_run_time_gracefully.lock().unwrap();
-                            *x = true;
+                        {       
+                            // On completions, reads may still be occupying pores, so we
+                            // need to send all of these into the write out channel
+                            let mut j = 0;
+                            for i in 0..channel_size {
+                                let read_info = channels.get(i).unwrap();
+                                if read_info.write_out {
+                                    complete_read_tx.send(read_info.clone()).unwrap();
+                                    j +=1 
+                                }
+                            }
+                            log::info!("Writing out reads still occupying pores: {j}");
+                            *end_run_time_gracefully.lock().unwrap() = true;
                         }
                         break;
                     }
@@ -1235,7 +1254,7 @@ impl DataService for DataServiceServicer {
 
                                     // Work out where a break_reads size finishes i.e if we have gotten 1.5 chunks worth since last time, 
                                     // that is not actually possible on a real sequencer. So we need to calculate where the 1 chunk finishes 
-                                    // and set that as the `prev_chunk_stop`` and serve it
+                                    // and set that as the `prev_chunk_stop` and serve it
 
                                     let full_width = stop - start;
                                     let chunks_in_width = full_width.div_euclid(chunk_size as usize);
@@ -1299,7 +1318,7 @@ impl DataService for DataServiceServicer {
                             action_responses: vec![]
                         }).await.unwrap_or_else(|_| {
                             panic!(
-                                "Failed to send read chunks - has the adaptive samplign client disconnected?"
+                                "Failed to send read chunks - has the adaptive sampling client disconnected?"
                             )
                         });
                         channel_data.clear();
