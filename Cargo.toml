@@ -35,6 +35,7 @@ lazy_static = "1.4.0"
 indicatif = "0.17.5"
 probability = "0.20.3"
 slow5 = { version = "0.11.0", features = ["serde"] }
+rayon = "1.8.1"
 
 
 [build-dependencies]

@@ -39,10 +39,16 @@ pub struct Icarust {
     pub config: Config,
 }
 impl Icarust {
-    pub fn from_toml(file_path: &PathBuf, output_path: Option<PathBuf>) -> Self {
+    pub fn from_toml(file_path: &PathBuf, simulation: Option<PathBuf>, deplete: Option<bool>, output_path: Option<PathBuf>, prefix: Option<String>,  force: bool) -> Self {
 
         log::debug!("Reading configuration file: {}", file_path.display());
         let mut config = load_toml(file_path);
+
+        // Set explicit input community in configuration
+        if let (Some(community), Some(deplete)) = (simulation, deplete) {
+            config.simulation.community = community;
+            config.simulation.deplete = deplete;
+        };
 
         if config.simulation.target_yield.is_none() && !config.simulation.deplete {
             log::error!("When continously sampling from community (deplete = false) target yield must be set in configuration file!");
@@ -69,9 +75,19 @@ impl Icarust {
             None => output_path_from_config
         };
 
+        config.outdir = match prefix {
+            Some(dir_prefix) => config.outdir.join(dir_prefix),
+            None => config.outdir
+        };
+        
         if !config.outdir.exists() {
             log::info!("Creating output directory: {}", config.outdir.display());
             create_dir_all(&config.outdir).unwrap();
+        } else {
+            if !force {
+                log::error!("Output directory exists: {}", config.outdir.display());
+                process::exit(1)
+            }
         }
 
         log::info!("{:#?}", config);
@@ -80,7 +96,7 @@ impl Icarust {
 
     }
     // Delay and runtime in seconds
-    pub async fn run(&self, data_delay: u64, data_runtime: u64) -> Result<(), Box<dyn std::error::Error>>  {
+    pub async fn run(&self, data_delay: u64, data_runtime: u64, log_actions: bool) -> Result<(), Box<dyn std::error::Error>>  {
 
         // Manager service
         let tls_manager = self.get_tls_config();
@@ -125,8 +141,11 @@ impl Icarust {
             self.config.parameters.channels, // total channel count for device
             graceful_shutdown_clone,
             data_delay,
-            data_runtime
+            data_runtime,
+            log_actions
         ));
+
+        log::info!("Icarust services have been built, launching service server...");
 
         let tls_position = self.get_tls_config();
         let addr_position: SocketAddr = format!("[::0]:{}", self.config.server.position_port).parse().unwrap();
@@ -177,7 +196,7 @@ impl Icarust {
                 // `run` method in a loop for benchmarks
                 data_handle.abort();
                 manager_handle.abort();
-                std::thread::sleep(Duration::from_secs(10));
+                std::thread::sleep(Duration::from_secs(5));
                 break;
             }
         }

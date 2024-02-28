@@ -35,7 +35,7 @@ working_pore_percent = 85
 
 [simulation]
 community = "/data/dev/meta-gp/cipher/testing/sim/simple_community.blow5"
-deplete = true
+deplete = false
 
 # Target yield must be specified if continuously sampling (deplete = false)
 # If specified with depletion sampling (deplete = true) the community linked 

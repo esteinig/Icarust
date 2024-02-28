@@ -22,6 +22,9 @@ pub struct Cli {
     /// Data generator thread run time in minutes
     #[clap(short='r', long, default_value="0")]
     pub data_run_time: u64,
+    /// Log the action counts to console
+    #[clap(short, long)]
+    pub log_actions: bool,
 }
 
 impl Cli {

@@ -5,6 +5,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{Stream, StreamExt};
+use rayon::prelude::*;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use std::pin::Pin;
 use std::cmp::min;
 use std::fmt;
 use std::mem;
+use std::fs::remove_file;
 
 
 use slow5::{EnumField, FileReader, RecordExt};
@@ -72,8 +74,10 @@ pub struct DataServiceServicer {
     action_responses: Arc<Mutex<Vec<get_live_reads_response::ActionResponse>>>,
     setup: Arc<Mutex<RunSetup>>,
     break_chunks_ms: u64,
+    data_service_sleep_ms: u64,
     channel_size: usize,
     sample_rate: u64,
+    log_actions: bool
 }
 #[derive(Clone)]
 struct SquigulatorRecord {
@@ -224,11 +228,12 @@ fn start_write_out_thread(
     run_id: String,
     config: &Config,
     write_out_gracefully: Arc<Mutex<bool>>,
+    chunk_size: f64
 ) -> SyncSender<ReadInfo> {
     let (complete_read_tx, complete_read_rx) = sync_channel(8000);
     
     let config = config.clone();
-
+    
     thread::spawn(move || {
         
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
@@ -288,19 +293,22 @@ fn start_write_out_thread(
                     .aux("start_time", FieldType::Uint64)
                     .aux("end_reason", FieldType::Enum(end_reason_enum))
                     .create(&output_blow5)
-                    .unwrap();
+                    .map_err(|err| log::error!("{}", err.to_string())).unwrap();
                 
                 log::info!("Writing out file to: {}", output_blow5.display());
 
                 let range_end = min(4000, read_infos.len());
+
+                let mut read_too_short = 0;
                 for read_info in read_infos.drain(..range_end) {
 
                     // Skip this read if we are trying to write it out twice
                     // this tends to happen very rarely e.g. on disconnection
                     if !read_numbers_seen.insert(read_info.read_id.clone()) {
-                        log::warn!("Read has been seen twice: {}", &read_info.read_id);
+                        log::debug!("Read has been seen twice: {}", &read_info.read_id);
                         continue;
                     }
+
 
                     let mut new_end = read_info.read.len();
 
@@ -308,20 +316,30 @@ fn start_write_out_thread(
                         // We calculate the actual unblocked signal array length using
                         // time of unblock and start time of read on write-out
                         let elapsed_time: chrono::TimeDelta = read_info.time_unblocked.time() - read_info.start_time_utc.time();
-                        let stop = convert_milliseconds_to_samples(
+                        let mut stop = convert_milliseconds_to_samples(
                             elapsed_time.num_milliseconds(),
                             config.simulation.sampling_rate,
                         );
+
+                        // Read is shorter than what basecallers can handle, this may be because 
+                        // of writing leftover reads currently in pores that have just started
+                        // and have been unblocked to clean up after completion (UnblockMuxChange) 
+                        // 
+                        // There is currently no good way to let these run for sufficient time because
+                        // the termination signal is sent within the DataService generator loop when
+                        // the read index is depleted or when run time is exceeded. We therefore simply
+                        // add the estimated signal chunk to the current length as if they had completed
+                        // a full chunk sample - this is more realistic than excluding them from outputs
+
+                        if stop < 200 {
+                            stop += chunk_size as usize;
+                            read_too_short += 1;
+                        }
                         new_end = min(stop, read_info.read.len());
                     }
 
 
                     let signal = read_info.read[0..new_end].to_vec();
-                    
-                    if signal.is_empty() {
-                        log::error!("Attempted to write empty signal");
-                        continue;
-                    };
 
                     let mut rec = Record::builder()
                         .read_id(read_info.read_id)
@@ -340,9 +358,11 @@ fn start_write_out_thread(
                     rec.set_aux_field(&mut writer, "start_mux", read_info.start_mux as u8).unwrap();
                     rec.set_aux_field(&mut writer, "start_time", read_info.start_time).unwrap();
             
-                    rec.set_aux_field(&mut writer, "end_reason",  match read_info.was_unblocked { 
-                        true =>  EnumField(Slow5EndReason::DataServiceUnblockMuxChange as usize),   
-                        false => EnumField(Slow5EndReason::SignalPositive as usize)
+                    rec.set_aux_field(&mut writer, "end_reason",  match read_info.end_reason { 
+                        4 =>  EnumField(Slow5EndReason::DataServiceUnblockMuxChange as usize),   
+                        3 => EnumField(Slow5EndReason::UnblockMuxChange as usize),
+                        1 => EnumField(Slow5EndReason::SignalPositive as usize),
+                        _ => EnumField(Slow5EndReason::Unknown as usize),
                     }).unwrap();
 
                     writer.add_record(&rec).unwrap();
@@ -351,6 +371,11 @@ fn start_write_out_thread(
                 read_numbers_seen.clear();
 
                 writer.close();
+
+                if read_too_short > 0 {
+                    log::warn!("{} leftover signal reads were amended with a full chunk", read_too_short);
+                }
+                
             }
 
             {
@@ -362,6 +387,7 @@ fn start_write_out_thread(
             thread::sleep(Duration::from_millis(1));
         }
         log::info!("Exiting write out thread...");
+
     });
     complete_read_tx
 }
@@ -369,6 +395,7 @@ fn start_write_out_thread(
 fn start_unblock_thread(
     channel_read_info: Arc<Mutex<Vec<ReadInfo>>>,
     run_setup: Arc<Mutex<RunSetup>>,
+    log_actions: bool
 ) -> SyncSender<GetLiveReadsRequest> {
 
     let (tx, rx): (
@@ -397,11 +424,14 @@ fn start_unblock_thread(
             
             total_unblocks += unblock_proc;
             total_sr += stop_rec_proc;
-
-            log::info!(
-                "Unblocked: {}, Stop receiving: {}, Total unblocks {}, total sr {}",
-                unblock_proc, stop_rec_proc, total_unblocks, total_sr
-            );
+            
+            if log_actions {
+                log::info!(
+                    "Unblocked: {}, Stop receiving: {}, Total unblocks {}, total sr {}",
+                    unblock_proc, stop_rec_proc, total_unblocks, total_sr
+                );
+            }
+            
         }
     });
 
@@ -561,14 +591,22 @@ fn stop_sending_read(
 
 /// Read the pre-computed simulation Blow5 from Cipher
 fn process_simulated_community(config: &Config) -> (FileReader, Vec<String>) {
+    
+    // If a community index file exists, we must remove it, 
+    // otherwise the reader breaks for some reason...
+    let community_idx = &config.simulation.community.with_extension("blow5.idx"); 
+
+    if community_idx.exists() {
+        remove_file(&community_idx).unwrap();
+    }
+    
     let mut reader = FileReader::open(&config.simulation.community).unwrap();
     
-    let mut read_index = Vec::new();
-    while let Some(Ok(rec)) = reader.records().next() {
-        read_index.push(
-            from_utf8(rec.read_id()).unwrap().to_string() // TODO: maybe this should be Vec<u8>
-        );
-    }
+    log::info!("Creating index vector for simulated reads...");
+    let read_index = reader.records().par_bridge().into_par_iter().map(|record| {
+        let rec: Record = record.unwrap();
+        from_utf8(rec.read_id()).unwrap().to_string()
+    }).collect();
 
     // Reader is consumed in above iteration and closes on drop, so we return another open handle
     let read_reader: FileReader = FileReader::open(&config.simulation.community).unwrap();
@@ -652,14 +690,6 @@ fn generate_read(
         log::warn!("Simulated reads have been depleted");
         return true;
     }
-
-    let now = Utc::now();
-
-    // Read start time in samples (seconds since start of experiment * sample rate)
-    read_info.start_time = (now.timestamp() as u64 - experiment_start_time) * sample_rate;
-    read_info.start_time_seconds = (now.timestamp() as u64 - experiment_start_time) as usize;
-    read_info.start_time_utc = now;
-
     // Set stop receiving to false so we don't accidentally not send the read
     read_info.stop_receiving = false;
     // Update as this read hasn't yet been unblocked
@@ -670,6 +700,14 @@ fn generate_read(
     read_info.write_out = true;
 
     read_info.read_number = *read_number;
+
+    let now = Utc::now();
+
+    // Read start time in samples (seconds since start of experiment * sample rate)
+    read_info.start_time = (now.timestamp() as u64 - experiment_start_time) * sample_rate;
+    read_info.start_time_seconds = (now.timestamp() as u64 - experiment_start_time) as usize;
+    read_info.start_time_utc = now;
+
 
     // We replace the entire read generation by a random sample 
     // of a signal read from a pre-computed community simulation
@@ -748,7 +786,7 @@ fn generate_read(
     read_info.read_id = read_uuid;
 
     // Reset these time based metrics
-    read_info.time_accessed = now;
+    read_info.time_accessed = Utc::now();
 
     // Previous chunk start has to be zero as there are now no previous chunks on a new read
     read_info.prev_chunk_start = 0;
@@ -767,8 +805,9 @@ impl DataServiceServicer {
         config: &Config,
         channel_size: usize,
         graceful_shutdown: Arc<Mutex<bool>>,
-        data_delay: u64,   // seconds
-        data_run_time: u64 // seconds
+        data_delay: u64,    // seconds
+        data_run_time: u64, // seconds 
+        log_actions: bool 
     ) -> DataServiceServicer {
 
         let now = Instant::now();
@@ -777,8 +816,10 @@ impl DataServiceServicer {
         let working_pore_percent = config.parameters.working_pore_percent;
         let break_chunks_ms: u64 = config.parameters.break_read_ms;
         let sample_rate: u64 = config.simulation.sampling_rate;
-        let start_time: u64 = Utc::now().timestamp() as u64;
-        
+
+        // Chunk size determined by break_chunk_ms and sample rate
+        let chunk_size = break_chunks_ms as f64 / 1000.0 * sample_rate as f64;
+
         // Creates a thread safe vector of channels holding `ReadInfo`
         let channel_vec_safe: Arc<Mutex<Vec<ReadInfo>>> = Arc::new(
             Mutex::new(Vec::with_capacity(channel_size))
@@ -807,7 +848,8 @@ impl DataServiceServicer {
         let complete_read_tx = start_write_out_thread(
             run_id, 
             config, 
-            write_out_gracefully
+            write_out_gracefully,
+            chunk_size
         );
 
         // Random number generator for pore starting counts, death chance, reacquisition chance, reaquisition pause
@@ -829,8 +871,6 @@ impl DataServiceServicer {
         log::info!("Pore death chances: {:#?}", death_chance);
 
 
-        // Logging
-        let mut time_logged_at: f64 = 0.0;
 
         if data_run_time > 0 {
             log::warn!("Maximum run time for data generation set to {} seconds", data_run_time)
@@ -849,6 +889,9 @@ impl DataServiceServicer {
             Some(v) => v, None => break_chunks_ms
         };
 
+        // Logging
+        let mut time_logged_at: f64 = 0.0;
+
         // Start the thread to generate data
         thread::spawn(move || {
 
@@ -857,6 +900,8 @@ impl DataServiceServicer {
                 log::info!("Delay data generation by {} seconds...", &data_delay);
                 thread::sleep(std::time::Duration::from_secs(data_delay.clone()));
             }
+
+            let start_time: u64 = Utc::now().timestamp() as u64; // must be after data delay
 
             // Setup reacquisition poisson distribution
             let reacquisition_poisson = ReacquisitionPoisson::new(1.0, 0.0, 0.0001, 0.05);
@@ -1024,16 +1069,20 @@ impl DataServiceServicer {
 
                             if depleted {
                                 // On completions, reads may still be occupying pores, so we
-                                // need to send all of these into the write out channel
+                                // need to send all of these into the write out channel as 
+                                // unblocks
                                 let mut j = 0;
                                 for i in 0..channel_size {
-                                    let read_info = channels.get(i).unwrap();
+                                    let read_info = channels.get_mut(i).unwrap();
                                     if read_info.write_out {
+                                        read_info.was_unblocked = true;
+                                        read_info.time_unblocked = Utc::now();
+                                        read_info.end_reason = 3;
                                         complete_read_tx.send(read_info.clone()).unwrap();
                                         j +=1 
                                     }
                                 }
-                                log::info!("Writing out reads still occupying pores: {j}");
+                                log::info!("Writing out reads still occupy pores: {j}");
                                 *graceful_shutdown.lock().unwrap() = true;
                                 break;
                             }
@@ -1071,11 +1120,15 @@ impl DataServiceServicer {
                         log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
                         {       
                             // On completions, reads may still be occupying pores, so we
-                            // need to send all of these into the write out channel
+                            // need to send all of these into the write out channel as
+                            // unblocks
                             let mut j = 0;
                             for i in 0..channel_size {
-                                let read_info = channels.get(i).unwrap();
+                                let read_info = channels.get_mut(i).unwrap();
                                 if read_info.write_out {
+                                    read_info.was_unblocked = true;
+                                    read_info.time_unblocked = Utc::now();
+                                    read_info.end_reason = 3;
                                     complete_read_tx.send(read_info.clone()).unwrap();
                                     j +=1 
                                 }
@@ -1094,9 +1147,12 @@ impl DataServiceServicer {
             read_data: channel_vec_safe, // Arc<Mutex> that links to the clone used in data generation loop
             action_responses: action_response_safe,
             setup: is_safe_setup,
-            break_chunks_ms: data_service_sleep_ms,
+            break_chunks_ms,
+            data_service_sleep_ms,
             channel_size,
             sample_rate,
+            log_actions
+
         }
     }
 }
@@ -1135,7 +1191,7 @@ impl DataService for DataServiceServicer {
         let setup = Arc::clone(&self.setup.clone());
 
         // Start the unblock thread on setup
-        let tx_unblocks = { start_unblock_thread(data_lock_unblock, setup) };
+        let tx_unblocks = { start_unblock_thread(data_lock_unblock, setup, self.log_actions) };
         
         // LiveReadsRequest counter
         let mut stream_counter = 1;
@@ -1150,6 +1206,8 @@ impl DataService for DataServiceServicer {
         // AsyncMutex for channel range implementation
         let channel_range = Arc::new(AsyncMutex::new(ChannelRange::new(&channel_size)));
         let channel_range_clone = Arc::clone(&channel_range);
+
+        let data_service_sleep_ms = self.data_service_sleep_ms;
 
         // Stream the responses back
         let output = async_stream::try_stream! {
@@ -1202,6 +1260,8 @@ impl DataService for DataServiceServicer {
                     
                     // - DNA R10.4.1 V14 at 400 bps and 5Khz => 5000/400 = 12.5 ADC per base => 30000/12.5 ~ 2.5kbp
                     // - DNA R9.4.1 at 450 bps and 4Khz => 4000/460 = 8.8 ADC per base => 30000/8.8 ~ 3.5kbp 
+
+                    // TODO
 
                     let max_read_len_samples: usize = 30000;
 
@@ -1280,7 +1340,7 @@ impl DataService for DataServiceServicer {
                                 read_info.prev_chunk_start = stop;
                                 let read_chunk = read_info.read[start..stop].to_vec();
 
-                                // Chunk is too short
+                                // Chunk is too short - TODO: can be configured?
                                 if read_chunk.len() < 300 {
                                     continue
                                 }
@@ -1345,8 +1405,8 @@ impl DataService for DataServiceServicer {
                     // this sleep are as expected, but might have affected delay in the unblock
                     // request?
                     
-                    if break_chunk_ms > 0 {
-                        thread::sleep(Duration::from_millis(break_chunk_ms));
+                    if data_service_sleep_ms > 0 {
+                        thread::sleep(Duration::from_millis(data_service_sleep_ms));
                     }
                     
                 }
