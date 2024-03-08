@@ -384,8 +384,10 @@ fn start_write_out_thread(
                 }
             }
             
+            // Give the loop a brief interval to collect reads
             thread::sleep(Duration::from_millis(1));
         }
+
         log::info!("Exiting write out thread...");
 
     });
@@ -841,8 +843,9 @@ impl DataServiceServicer {
         let (mut read_reader, mut read_index) = process_simulated_community(&config);
         
         // Graceful termination signals handled in main routine
-        let write_out_gracefully = Arc::clone(&graceful_shutdown);
-        let end_run_time_gracefully: Arc<Mutex<bool>> = Arc::clone(&write_out_gracefully);
+        let write_out_gracefully = Arc::new(Mutex::new(false));
+        let write_out_gracefully_clone: Arc<Mutex<bool>> = Arc::clone(&write_out_gracefully);
+        let end_runtime_gracefully = Arc::clone(&graceful_shutdown);
 
         // Write out thread queue sender
         let complete_read_tx = start_write_out_thread(
@@ -1117,7 +1120,7 @@ impl DataServiceServicer {
                 // the data generation routine can be used as library import and does not shutdown main runtime
                 if data_run_time > 0 {
                     if now.elapsed().as_secs() >= data_run_time+data_delay {
-                        log::warn!("Maximum run time for exceeded, ceased data generation and shutting down...");
+                        log::warn!("Maximum run time exceeded, ceased data generation and shutting down...");
                         {       
                             // On completions, reads may still be occupying pores, so we
                             // need to send all of these into the write out channel as
@@ -1134,7 +1137,15 @@ impl DataServiceServicer {
                                 }
                             }
                             log::info!("Writing out reads still occupying pores: {j}");
-                            *end_run_time_gracefully.lock().unwrap() = true;
+                            
+                            *write_out_gracefully_clone.lock().unwrap() = true;
+
+                            // Wait a little bit for the writer thread to finish...
+                            thread::sleep(Duration::from_secs(10));
+
+                            *end_runtime_gracefully.lock().unwrap() = true;
+
+
                         }
                         break;
                     }

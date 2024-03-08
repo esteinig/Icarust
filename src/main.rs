@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     args.set_logging();
     args.check_config_exists();
 
-    let icarust = Icarust::from_toml(&args.profile, args.outdir);
+    let icarust = Icarust::from_toml(&args.profile, None, None, args.outdir, None, false);
     icarust.run(args.data_delay, args.data_run_time, args.log_actions).await?;
 
     Ok(())
