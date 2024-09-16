@@ -20,7 +20,7 @@ working_pore_percent = 85
 # adjusted due to target yield 
 # integration)
 
-# pore_death_multiplier = 1.0
+pore_death_multiplier = 1.0
 
 # Use these to setup a tradtional run output
 # directory where signal data is deposited
